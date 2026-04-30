@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+outputs/
+*.png
+*.gif
+*.pt
+*.npz
+*.csv
+*.json
+
+.cursor/
+mcps/
+terminals/
+agent-transcripts/
