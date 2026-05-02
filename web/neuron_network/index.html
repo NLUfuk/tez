@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Nöron ağı — katmanlı Izhikevich</title>
+  <style>
+    * { margin: 0; box-sizing: border-box; }
+    body {
+      background: #08080a;
+      color: #c8c8d0;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      min-height: 100vh;
+      padding: 10px;
+    }
+    .app {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      align-items: flex-start;
+      justify-content: center;
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+    h1 {
+      width: 100%;
+      text-align: center;
+      font-size: 0.98rem;
+      font-weight: 600;
+      letter-spacing: 0.03em;
+      color: #e2e4ec;
+      margin-bottom: 2px;
+    }
+    .panel {
+      width: 268px;
+      flex-shrink: 0;
+      background: linear-gradient(165deg, #12121a 0%, #0e0e14 100%);
+      border: 1px solid #2a2a38;
+      border-radius: 8px;
+      padding: 14px;
+      font-size: 0.8rem;
+      line-height: 1.45;
+    }
+    .panel h2 {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: #7a8aa6;
+      margin-bottom: 10px;
+      border-bottom: 1px solid #2a2a38;
+      padding-bottom: 6px;
+    }
+    .panel section { margin-bottom: 14px; }
+    .panel .row {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      margin: 4px 0;
+    }
+    .panel .lbl { color: #7d8190; }
+    .panel .val {
+      font-variant-numeric: tabular-nums;
+      color: #a8dcff;
+      text-align: right;
+    }
+    .panel .val-savings {
+      font-weight: 700;
+      font-size: 0.92rem;
+      letter-spacing: 0.03em;
+      color: #5cffb0;
+      text-shadow: 0 0 12px rgba(92, 255, 176, 0.45);
+      text-align: right;
+    }
+    .panel label { display: block; margin-bottom: 4px; color: #9a9ead; }
+    .panel input[type="number"],
+    .panel select {
+      width: 100%;
+      padding: 8px 10px;
+      border-radius: 6px;
+      border: 1px solid #333;
+      background: #0a0a10;
+      color: #e8eaf0;
+      font-size: 0.88rem;
+      margin-bottom: 8px;
+    }
+    .panel select {
+      cursor: pointer;
+      appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%2399aabd'%3E%3Cpath d='M6 9L1 4h10z'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 10px center;
+      padding-right: 28px;
+    }
+    .panel button {
+      width: 100%;
+      padding: 9px 10px;
+      border-radius: 6px;
+      border: 1px solid #3d4a62;
+      background: linear-gradient(180deg, #1e2a3c, #161d2a);
+      color: #d4e6ff;
+      font-size: 0.82rem;
+      cursor: pointer;
+      margin-bottom: 6px;
+    }
+    .panel button:hover {
+      border-color: #5a6d8e;
+      background: linear-gradient(180deg, #243248, #1a2434);
+    }
+    .panel button.secondary {
+      border-color: #3a3530;
+      background: linear-gradient(180deg, #2a2620, #1c1a18);
+      color: #c8beb0;
+    }
+    .panel .philosophy {
+      font-size: 0.74rem;
+      line-height: 1.48;
+      color: #8588a4;
+      margin-bottom: 10px;
+      padding: 8px;
+      border-left: 3px solid #3d5670;
+      background: rgba(0,0,0,0.2);
+      border-radius: 0 6px 6px 0;
+    }
+    .panel .control-range {
+      width: 100%;
+      margin: 6px 0 4px;
+    }
+    .panel .range-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+    .panel .range-row .mono {
+      font-variant-numeric: tabular-nums;
+      color: #7cfdcb;
+      min-width: 2.5rem;
+    }
+    .panel .chk-row label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+      margin-bottom: 0;
+      color: #b4b8c9;
+    }
+    .panel .chk-row input { cursor: pointer; }
+    #p5-root {
+      flex: 1;
+      min-width: 480px;
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+    }
+    #p5-root canvas {
+      display: block;
+      border-radius: 6px;
+      box-shadow: 0 6px 32px rgba(0,0,0,0.55);
+      border: 1px solid #1c1c24;
+    }
+    .hint {
+      width: 100%;
+      text-align: center;
+      font-size: 0.78rem;
+      line-height: 1.55;
+      color: #75788a;
+      margin-top: 10px;
+      max-width: 1100px;
+      margin-left: auto;
+      margin-right: auto;
+    }
+    kbd {
+      padding: 1px 5px;
+      border: 1px solid #444;
+      border-radius: 3px;
+      font-family: inherit;
+      font-size: 0.72rem;
+    }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/p5@1.11.5/lib/p5.min.js"></script>
+</head>
+<body>
+  <h1>Katmanlı ağ · girdi → gizli kümeler → çıktı · Izhikevich</h1>
+  <div class="app">
+    <aside class="panel" id="live-panel">
+      <p class="philosophy">
+        <strong>ANN × CA:</strong> Ağ = ileri beslemeli topo; Conway benzeri kural graf üzerinde çalışır ve yalnızca
+        <em>gizli</em> üniteler için “işlem kapısı”dır — girdi/çıktı dış uyarımla sürekli etkindir.
+        İki Conway modu: <strong>spike</strong> (jenerasyon olayı) veya <strong>aktif komşu</strong> (graf-GoL).
+        Graf yenilemesi varsayılan her kare; N&gt;1 performans için geciken kenar listesi ile takaslanır.
+      </p>
+      <h2>Kontroller</h2>
+      <section>
+        <label for="conway-metric">CA komşu sayımı</label>
+        <select id="conway-metric" title="Spike veya klasik graf-aktif Conway">
+          <option value="spike">Spike tabanlı (olaylı)</option>
+          <option value="alive">Aktif komşu (klasik GoL grafiği)</option>
+        </select>
+        <label for="rebuild-every-input">Sinaps grafiği: her N kare</label>
+        <input type="number" id="rebuild-every-input" min="1" max="60" step="1" value="1" title="O(N²) yeniden bağlanır; N büyükse düğümler yaklaşınca sinaps güncesi gecikir" />
+        <label for="gen-period-range">CA jenerasyon süresi (ms)</label>
+        <div class="range-row">
+          <input class="control-range" type="range" id="gen-period-range" min="15" max="250" step="5" value="50" />
+          <span class="mono" id="gen-period-label">50</span>
+        </div>
+        <div class="chk-row">
+          <label><input type="checkbox" id="mouse-attract-cb" /> İmleç çekimi (<kbd>G</kbd>)</label>
+        </div>
+      </section>
+      <h2>Canlı veri</h2>
+      <section>
+        <div class="row"><span class="lbl">Jenerasyon</span><span class="val" id="stat-gen">—</span></div>
+        <div class="row"><span class="lbl">Jenerasyon Δt (ms)</span><span class="val" id="stat-gen-dt">—</span></div>
+        <div class="row"><span class="lbl">Kare</span><span class="val" id="stat-frame">—</span></div>
+        <div class="row"><span class="lbl">Δt sim (s)</span><span class="val" id="stat-time">—</span></div>
+        <div class="row"><span class="lbl">Sinapslar</span><span class="val" id="stat-edges">—</span></div>
+        <div class="row"><span class="lbl">CA modu · graf N</span><span class="val" id="stat-ca-rebuild-short">—</span></div>
+        <div class="row"><span class="lbl">Spike (son kare)</span><span class="val" id="stat-spikes">—</span></div>
+      </section>
+      <h2>Katman durumu</h2>
+      <section>
+        <div class="row"><span class="lbl">Girdi · aktif / pasif / ölü</span><span class="val" id="stat-in">—</span></div>
+        <div class="row"><span class="lbl">Gizli · aktif / pasif / ölü</span><span class="val" id="stat-hid">—</span></div>
+        <div class="row"><span class="lbl">Çıktı · aktif / pasif / ölü</span><span class="val" id="stat-out">—</span></div>
+        <div class="row"><span class="lbl">Ort. v (girdi | gizli | çıktı)</span><span class="val" id="stat-v">—</span></div>
+        <div class="row"><span class="lbl">Son girdi I (elle)</span><span class="val" id="stat-last-i">—</span></div>
+      </section>
+      <h2>Verimlilik metrikleri</h2>
+      <section title="Pasif nöronlarda Izhikevich adımı atlanır">
+        <div class="row"><span class="lbl">Geleneksel yük · toplam N</span><span class="val" id="stat-eff-traditional">—</span></div>
+        <div class="row"><span class="lbl">Mevcut yük · canlı (aktif) N′</span><span class="val" id="stat-eff-current">—</span></div>
+        <div class="row"><span class="lbl">Tasarruf · (1−N′/N)×100</span><span class="val val-savings" id="stat-eff-savings">—</span></div>
+      </section>
+      <h2>Girdi akımı</h2>
+      <section>
+        <label for="manual-I">Manuel akım <em>I</em> (tüm girdi nöronları, mA/c.m² birimine göre kodda)</label>
+        <input type="number" id="manual-I" value="24" step="0.5" />
+        <button type="button" id="btn-inject">Simülasyonu bu I ile uyandır</button>
+        <button type="button" class="secondary" id="btn-reset">Düzeni sıfırla (R)</button>
+      </section>
+    </aside>
+    <main id="p5-root"></main>
+  </div>
+  <p class="hint">
+    <strong>Yapay ağ:</strong> girdi <em>I</em>, sinaps omurgası, gizlide Izh, çıktı okuma.
+    <strong>Hücre:</strong> gizlide doğum/yalnızlık/taş nüfus — Spike modu olay dizilimine, “Aktif komşu” modu doğrudan
+    komşuların aktivitesine bağlıdır (<code>conwayNeighborMetric</code>). <strong>Perf:</strong> sinaps grafını her
+    N karede kurmak işlem yüzünden daha ucuzdur; doğruluk N yüksekken biraz gevşeyebilir.
+    <kbd>R</kbd> / <kbd>I</kbd> / süre kaydırıcısı.
+  </p>
+  <script src="sketch.js"></script>
+</body>
+</html>
