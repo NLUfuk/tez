@@ -1,7 +1,7 @@
 """Configuration dataclasses for Conway-Izhikevich simulation."""
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Sequence, Tuple
 
 
 @dataclass
@@ -17,9 +17,14 @@ class IzhikevichParams:
 class CouplingParams:
     """Coupling parameters between Conway and Izhikevich."""
     k_neighbors: float = 0.5  # Weight for neighbor count
-    k_alive: float = 2.0      # Weight for alive cells
-    bias: float = 0.0         # Constant bias
+    k_alive: float = 4.0      # Weight for alive cells (stream viz default tuned for visible spikes)
+    bias: float = 0.5         # Constant bias
     feedback_enabled: bool = False  # Enable neuron->GoL feedback
+    # A: small-world graph spike drive (uses spike_trace, see coupling.py)
+    k_syn: float = 0.0  # Input current from graph neighbors' spike trace (mV-equivalent scale)
+    spike_trace_decay: float = 0.88  # Low-pass on spike history for sustained propagation
+    # C: spikes can set GoL alive on graph postsynaptic indices (not only spike cell)
+    feedback_graph_neighbors: bool = False
     use_game_theory: bool = False  # Use game theory based spike generation
     propagation_strength: float = 0.5  # Spike propagation strength (0-1)
     cooperation_factor: float = 0.3  # How much propagation influences spike decision
@@ -63,6 +68,13 @@ class SimulationConfig:
     
     # Conway parameters
     wrap_around: bool = False  # Boundary wrapping
+    birth_neighbors: Tuple[int, ...] = (3,)
+    survive_neighbors: Tuple[int, ...] = (2, 3)
+
+    # Watts–Strogatz graph (must match StreamPublisher / viz if used)
+    small_world_k: int = 6
+    small_world_rewire: float = 0.08
+    graph_edges: Optional[Sequence[Tuple[int, int]]] = None  # if None, built at init
     
     # Izhikevich parameters
     izh_params: IzhikevichParams = None

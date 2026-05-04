@@ -6,51 +6,79 @@
   <title>Nöron ağı — katmanlı Izhikevich</title>
   <style>
     * { margin: 0; box-sizing: border-box; }
+    html, body {
+      height: 100%;
+      overflow: hidden;
+    }
     body {
       background: #08080a;
       color: #c8c8d0;
       font-family: "Segoe UI", system-ui, sans-serif;
-      min-height: 100vh;
-      padding: 10px;
+    }
+    .page {
+      height: 100%;
+      max-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      padding: 8px 10px 6px;
     }
     .app {
+      flex: 1;
+      min-height: 0;
       display: flex;
-      flex-wrap: wrap;
-      gap: 14px;
-      align-items: flex-start;
+      flex-wrap: nowrap;
+      gap: 12px;
+      align-items: stretch;
       justify-content: center;
       max-width: 1400px;
+      width: 100%;
       margin: 0 auto;
+      overflow: hidden;
     }
     h1 {
-      width: 100%;
+      flex-shrink: 0;
       text-align: center;
-      font-size: 0.98rem;
+      font-size: 0.92rem;
       font-weight: 600;
       letter-spacing: 0.03em;
       color: #e2e4ec;
-      margin-bottom: 2px;
+      line-height: 1.25;
     }
     .panel {
-      width: 268px;
+      width: 300px;
       flex-shrink: 0;
+      min-height: 0;
+      max-height: 100%;
+      overflow-x: hidden;
+      overflow-y: auto;
+      overscroll-behavior: contain;
       background: linear-gradient(165deg, #12121a 0%, #0e0e14 100%);
       border: 1px solid #2a2a38;
       border-radius: 8px;
-      padding: 14px;
-      font-size: 0.8rem;
-      line-height: 1.45;
+      padding: 10px 12px;
+      font-size: 0.76rem;
+      line-height: 1.42;
+      scrollbar-width: thin;
+      scrollbar-color: #3d4a62 #15151d;
+    }
+    .panel::-webkit-scrollbar {
+      width: 6px;
+    }
+    .panel::-webkit-scrollbar-thumb {
+      background: #3d4a62;
+      border-radius: 4px;
     }
     .panel h2 {
-      font-size: 0.72rem;
+      font-size: 0.68rem;
       text-transform: uppercase;
       letter-spacing: 0.12em;
       color: #7a8aa6;
-      margin-bottom: 10px;
+      margin-bottom: 6px;
       border-bottom: 1px solid #2a2a38;
-      padding-bottom: 6px;
+      padding-bottom: 5px;
     }
-    .panel section { margin-bottom: 14px; }
+    .panel section { margin-bottom: 10px; }
     .panel .row {
       display: flex;
       justify-content: space-between;
@@ -112,11 +140,11 @@
       color: #c8beb0;
     }
     .panel .philosophy {
-      font-size: 0.74rem;
-      line-height: 1.48;
+      font-size: 0.7rem;
+      line-height: 1.38;
       color: #8588a4;
-      margin-bottom: 10px;
-      padding: 8px;
+      margin-bottom: 8px;
+      padding: 6px 8px;
       border-left: 3px solid #3d5670;
       background: rgba(0,0,0,0.2);
       border-radius: 0 6px 6px 0;
@@ -145,12 +173,28 @@
       color: #b4b8c9;
     }
     .panel .chk-row input { cursor: pointer; }
+    .panel .grid-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px 10px;
+      margin-bottom: 8px;
+    }
+    .panel .grid-2 label { margin-bottom: 2px; font-size: 0.72rem; }
+    .panel .grid-2 input { margin-bottom: 0; }
+    .panel .section-note {
+      font-size: 0.68rem;
+      color: #6a6e82;
+      margin: 0 0 8px;
+      line-height: 1.35;
+    }
     #p5-root {
       flex: 1;
-      min-width: 480px;
+      min-width: 0;
+      min-height: 0;
       display: flex;
       justify-content: center;
-      align-items: flex-start;
+      align-items: center;
+      overflow: hidden;
     }
     #p5-root canvas {
       display: block;
@@ -159,15 +203,18 @@
       border: 1px solid #1c1c24;
     }
     .hint {
+      flex-shrink: 0;
       width: 100%;
-      text-align: center;
-      font-size: 0.78rem;
-      line-height: 1.55;
-      color: #75788a;
-      margin-top: 10px;
       max-width: 1100px;
-      margin-left: auto;
-      margin-right: auto;
+      margin: 0 auto;
+      text-align: center;
+      font-size: 0.68rem;
+      line-height: 1.38;
+      color: #75788a;
+      max-height: clamp(52px, 11vh, 88px);
+      overflow-y: auto;
+      scrollbar-width: thin;
+      padding: 2px 4px;
     }
     kbd {
       padding: 1px 5px;
@@ -180,16 +227,48 @@
   <script src="https://cdn.jsdelivr.net/npm/p5@1.11.5/lib/p5.min.js"></script>
 </head>
 <body>
+  <div class="page">
   <h1>Katmanlı ağ · girdi → gizli kümeler → çıktı · Izhikevich</h1>
   <div class="app">
     <aside class="panel" id="live-panel">
       <p class="philosophy">
-        <strong>ANN × CA:</strong> Ağ = ileri beslemeli topo; Conway benzeri kural graf üzerinde çalışır ve yalnızca
-        <em>gizli</em> üniteler için “işlem kapısı”dır — girdi/çıktı dış uyarımla sürekli etkindir.
-        İki Conway modu: <strong>spike</strong> (jenerasyon olayı) veya <strong>aktif komşu</strong> (graf-GoL).
-        Graf yenilemesi varsayılan her kare; N&gt;1 performans için geciken kenar listesi ile takaslanır.
+        <strong>ANN × CA:</strong> Conway yalnızca <em>gizli</em> katmanda Izh kapısı; girdi/çıktı arayüz için sürekli etkin.
+        <strong>Spike</strong> / <strong>aktif komşu</strong> modları; sinaps listesi her N karede yenilenir.
       </p>
-      <h2>Kontroller</h2>
+      <h2>1 · Ağ topolojisi</h2>
+      <section>
+        <p class="section-note">Sayıları değiştirdikten sonra <strong>Topolojiyi uygula</strong> ile ağı yeniden kurun (konum + graf sıfırlanır).</p>
+        <div class="grid-2">
+          <div>
+            <label for="cfg-input-count">Girdi</label>
+            <input type="number" id="cfg-input-count" min="2" max="32" step="1" value="7" />
+          </div>
+          <div>
+            <label for="cfg-output-count">Çıktı</label>
+            <input type="number" id="cfg-output-count" min="1" max="32" step="1" value="6" />
+          </div>
+          <div>
+            <label for="cfg-hidden-clusters">Gizli küme</label>
+            <input type="number" id="cfg-hidden-clusters" min="1" max="12" step="1" value="3" />
+          </div>
+          <div>
+            <label for="cfg-hidden-per-cluster">Küme başına</label>
+            <input type="number" id="cfg-hidden-per-cluster" min="1" max="24" step="1" value="6" />
+          </div>
+        </div>
+        <button type="button" id="btn-apply-topology">Topolojiyi uygula</button>
+      </section>
+      <h2>2 · Girdi akımı <em>I</em></h2>
+      <section>
+        <label for="manual-I">Panel <em>I</em> değeri</label>
+        <input type="number" id="manual-I" value="24" step="0.5" />
+        <div class="chk-row">
+          <label><input type="checkbox" id="sustained-i-cb" /> Sürekli uygula (her kare girdi katmanına eklenir)</label>
+        </div>
+        <button type="button" id="btn-inject">Kısa süreli uyandır (~950&nbsp;ms)</button>
+        <p class="section-note">Kısa uyandırma, sürekli I ile birlikte kullanılırsa toplanır. <kbd>I</kbd> tuşu paneldeki <em>I</em> ile aynı kısa enjeksiyonu yapar.</p>
+      </section>
+      <h2>3 · Conway ve graf</h2>
       <section>
         <label for="conway-metric">CA komşu sayımı</label>
         <select id="conway-metric" title="Spike veya klasik graf-aktif Conway">
@@ -206,6 +285,11 @@
         <div class="chk-row">
           <label><input type="checkbox" id="mouse-attract-cb" /> İmleç çekimi (<kbd>G</kbd>)</label>
         </div>
+      </section>
+      <h2>4 · Simülasyon</h2>
+      <section>
+        <button type="button" class="secondary" id="btn-reset">Düzeni sıfırla (<kbd>R</kbd>)</button>
+        <p class="section-note">Aynı topoloji ve ayarlarla nöron konumları ve jenerasyon sayacı yeniden başlar.</p>
       </section>
       <h2>Canlı veri</h2>
       <section>
@@ -225,18 +309,13 @@
         <div class="row"><span class="lbl">Ort. v (girdi | gizli | çıktı)</span><span class="val" id="stat-v">—</span></div>
         <div class="row"><span class="lbl">Son girdi I (elle)</span><span class="val" id="stat-last-i">—</span></div>
       </section>
-      <h2>Verimlilik metrikleri</h2>
-      <section title="Pasif nöronlarda Izhikevich adımı atlanır">
-        <div class="row"><span class="lbl">Geleneksel yük · toplam N</span><span class="val" id="stat-eff-traditional">—</span></div>
-        <div class="row"><span class="lbl">Mevcut yük · canlı (aktif) N′</span><span class="val" id="stat-eff-current">—</span></div>
-        <div class="row"><span class="lbl">Tasarruf · (1−N′/N)×100</span><span class="val val-savings" id="stat-eff-savings">—</span></div>
-      </section>
-      <h2>Girdi akımı</h2>
-      <section>
-        <label for="manual-I">Manuel akım <em>I</em> (tüm girdi nöronları, mA/c.m² birimine göre kodda)</label>
-        <input type="number" id="manual-I" value="24" step="0.5" />
-        <button type="button" id="btn-inject">Simülasyonu bu I ile uyandır</button>
-        <button type="button" class="secondary" id="btn-reset">Düzeni sıfırla (R)</button>
+      <h2>Verimlilik (Izh adımı)</h2>
+      <section title="Pasif/ölü birimlerde Izh Euler atlanır">
+        <p class="section-note"><strong>Tam ağ:</strong> ölü olmayan her nöron için naif Izh (N) karşı şu an Izh koşan aktif sayısı (N′). <strong>Gizli:</strong> yalnızca Conway kapısı olan gizli katman.</p>
+        <div class="row"><span class="lbl">Tam ağ · N / N′</span><span class="val" id="stat-eff-naive">—</span></div>
+        <div class="row"><span class="lbl">Tam tasarruf (1−N′/N)×100</span><span class="val" id="stat-eff-naive-sav">—</span></div>
+        <div class="row"><span class="lbl">Gizli (kapı) · N / N′</span><span class="val" id="stat-eff-hid">—</span></div>
+        <div class="row"><span class="lbl">Gizli tasarruf</span><span class="val val-savings" id="stat-eff-savings">—</span></div>
       </section>
     </aside>
     <main id="p5-root"></main>
@@ -246,8 +325,9 @@
     <strong>Hücre:</strong> gizlide doğum/yalnızlık/taş nüfus — Spike modu olay dizilimine, “Aktif komşu” modu doğrudan
     komşuların aktivitesine bağlıdır (<code>conwayNeighborMetric</code>). <strong>Perf:</strong> sinaps grafını her
     N karede kurmak işlem yüzünden daha ucuzdur; doğruluk N yüksekken biraz gevşeyebilir.
-    <kbd>R</kbd> / <kbd>I</kbd> / süre kaydırıcısı.
+    Topoloji değişince panelden uygulayın; <kbd>R</kbd> sıfırlar; <kbd>I</kbd> panel <em>I</em> ile kısa enjeksiyon.
   </p>
+  </div>
   <script src="sketch.js"></script>
 </body>
 </html>

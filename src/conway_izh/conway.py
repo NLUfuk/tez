@@ -1,7 +1,7 @@
 """Conway Game of Life implementation using NumPy."""
 
 import numpy as np
-from typing import Tuple
+from typing import Sequence, Tuple
 
 
 def count_neighbors(state: np.ndarray, wrap_around: bool = False) -> np.ndarray:
@@ -38,11 +38,14 @@ def count_neighbors(state: np.ndarray, wrap_around: bool = False) -> np.ndarray:
     return neighbors
 
 
-def update_conway(state: np.ndarray, wrap_around: bool = False) -> np.ndarray:
+def update_conway(
+    state: np.ndarray,
+    wrap_around: bool = False,
+    birth_neighbors: Sequence[int] = (3,),
+    survive_neighbors: Sequence[int] = (2, 3),
+) -> np.ndarray:
     """
-    Update Conway Game of Life state using B3/S23 rule.
-    
-    B3/S23: Birth if 3 neighbors, Survive if 2 or 3 neighbors.
+    Update Conway Game of Life state using configurable B/S rules.
     
     Args:
         state: Current binary grid (H, W) dtype uint8
@@ -53,9 +56,10 @@ def update_conway(state: np.ndarray, wrap_around: bool = False) -> np.ndarray:
     """
     neighbors = count_neighbors(state, wrap_around)
     
-    # B3/S23 rule
-    birth = (neighbors == 3) & (state == 0)
-    survive = ((neighbors == 2) | (neighbors == 3)) & (state == 1)
+    birth_mask = np.isin(neighbors, np.asarray(tuple(birth_neighbors), dtype=np.uint8))
+    survive_mask = np.isin(neighbors, np.asarray(tuple(survive_neighbors), dtype=np.uint8))
+    birth = birth_mask & (state == 0)
+    survive = survive_mask & (state == 1)
     
     new_state = np.zeros_like(state, dtype=np.uint8)
     new_state[birth | survive] = 1

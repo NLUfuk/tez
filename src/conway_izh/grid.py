@@ -2,7 +2,7 @@
 
 import numpy as np
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Sequence, Tuple
 import time
 
 from conway_izh.config import SimulationConfig
@@ -12,7 +12,7 @@ from conway_izh.conway import (
 from conway_izh.izhikevich import (
     initialize_izhikevich, step_izhikevich, IzhikevichParams
 )
-from conway_izh.coupling import gol_to_current, neuron_to_gol_feedback
+from conway_izh.coupling import gol_to_current, graph_trace_to_drive, neuron_to_gol_feedback
 from conway_izh.game_theory_coupling import (
     conway_to_current_game_theory,
     game_theory_spike_decision,
@@ -22,8 +22,12 @@ from conway_izh.game_theory_coupling import (
 )
 from conway_izh.metrics import compute_metrics
 from conway_izh.viz import (
-    save_gol_frame, save_v_heatmap, save_spike_raster,
-    save_metrics_csv, create_gif
+    save_gol_frame,
+    save_v_heatmap,
+    save_spike_raster,
+    save_metrics_csv,
+    create_gif,
+    create_small_world_graph,
 )
 
 
@@ -69,7 +73,29 @@ class NeuralGrid:
         self.strategy_map: np.ndarray = np.ones(
             (config.height, config.width), dtype=np.int8
         )
-        
+
+        self.spike_trace = np.zeros(
+            (config.height, config.width), dtype=np.float64
+        )
+        self.graph_edges: List[Tuple[int, int]] = []
+        self._graph_adj: List[np.ndarray] = []
+        self._edges_arr = np.zeros((0, 2), dtype=np.int32)
+
+        n = config.height * config.width
+        if config.graph_edges is not None:
+            self.attach_graph_edges(
+                [(int(a), int(b)) for a, b in config.graph_edges]
+            )
+        else:
+            self.attach_graph_edges(
+                create_small_world_graph(
+                    n,
+                    k_neighbors=config.small_world_k,
+                    rewire_prob=config.small_world_rewire,
+                    seed=config.seed,
+                )
+            )
+
         # Setup output directory
         self.output_dir = Path(config.output_dir)
         if config.run_id:
@@ -79,7 +105,24 @@ class NeuralGrid:
             self.output_dir = self.output_dir / f"run_{timestamp}"
         
         self.output_dir.mkdir(parents=True, exist_ok=True)
-    
+
+    def attach_graph_edges(self, edges: Sequence[Tuple[int, int]]) -> None:
+        """Replace small-world topology (stream reset / shared viz graph). Clears spike_trace."""
+        from conway_izh.coupling import adjacency_from_edges
+
+        clean: List[Tuple[int, int]] = []
+        for e in edges:
+            clean.append((int(e[0]), int(e[1])))
+        self.graph_edges = clean
+        n_nodes = self.config.height * self.config.width
+        self._graph_adj = adjacency_from_edges(self.graph_edges, n_nodes)
+        if self.graph_edges:
+            arr = np.asarray(self.graph_edges, dtype=np.int32)
+            self._edges_arr = arr.reshape(-1, 2)
+        else:
+            self._edges_arr = np.zeros((0, 2), dtype=np.int32)
+        self.spike_trace.fill(0.0)
+
     def step(self) -> tuple[dict, np.ndarray]:
         """
         Perform one simulation step.
@@ -163,19 +206,35 @@ class NeuralGrid:
             
         else:
             # Original coupling method
-            # Convert GoL state to input current
+            # Convert GoL state to input current + graph spike-drive (small-world trace)
             I = gol_to_current(
                 self.gol_state, neighbor_count, self.config.coupling
             )
-            
+            cp = self.config.coupling
+            if cp.k_syn != 0.0 and self._edges_arr.size != 0:
+                drive_flat = graph_trace_to_drive(
+                    self.spike_trace.ravel(),
+                    self._edges_arr,
+                    cp.k_syn,
+                )
+                I = I + drive_flat.reshape(self.gol_state.shape)
+
             # Update neurons
             self.v, self.u, spikes = step_izhikevich(
                 self.v, self.u, I, self.config.izh_params, self.config.dt
             )
-        
+
+        gamma = float(np.clip(self.config.coupling.spike_trace_decay, 0.0, 1.0))
+        self.spike_trace = (
+            gamma * self.spike_trace + spikes.astype(np.float64)
+        )
+
         # Update Conway grid
         new_gol_state = update_conway(
-            self.gol_state, self.config.wrap_around
+            self.gol_state,
+            self.config.wrap_around,
+            self.config.birth_neighbors,
+            self.config.survive_neighbors,
         )
         
         # Apply neuron feedback
@@ -190,8 +249,16 @@ class NeuralGrid:
                     self.config.coupling.cooperation_strength
                 )
             else:
-                # Original feedback
-                new_gol_state = neuron_to_gol_feedback(new_gol_state, spikes)
+                gn = (
+                    self.config.coupling.feedback_graph_neighbors
+                    and len(self._graph_adj) > 0
+                )
+                new_gol_state = neuron_to_gol_feedback(
+                    new_gol_state,
+                    spikes,
+                    graph_adj=self._graph_adj if gn else None,
+                    excite_neighbors=gn,
+                )
         
         self.gol_state = new_gol_state
         

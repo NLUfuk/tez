@@ -74,7 +74,16 @@ const CFG = {
   backboneInputToHidden: 5,
   /** Her çıktı, en yakın M gizli ile bağlanır */
   backboneHiddenToOutput: 4,
+  /**
+   * Panel: girdi katmanına sürekli ek I (kısa süreli inject ile toplanır).
+   * Değer `sustainedInputIValue`; açık/kapalı `sustainedInputFromPanel`.
+   */
+  sustainedInputFromPanel: false,
+  sustainedInputIValue: 24,
 };
+
+/** p5 örneği — panelden tuval boyutuyla sıfırlama için */
+let tezP5Ref = null;
 
 let neurons = [];
 let synapticNeighbors = [];
@@ -138,8 +147,12 @@ class Neuron {
 
   manualIDrive(nowMs) {
     if (this.layer !== "input") return 0;
-    if (nowMs >= this.extraManualIUntilMs) return 0;
-    return this.extraManualI;
+    const pulse =
+      nowMs < this.extraManualIUntilMs ? this.extraManualI : 0;
+    const sustained = CFG.sustainedInputFromPanel
+      ? CFG.sustainedInputIValue
+      : 0;
+    return pulse + sustained;
   }
 
   izhDrive(nowMs) {
@@ -791,11 +804,28 @@ function countEdges() {
   return e >> 1;
 }
 
-/** Kodda olduğu gibi: yalnızca life==='active' için Izh Euler + çoğu sinaptik hedef işlemi yapılır. */
-function computeIzhiWorkloadMetrics() {
-  const traditional = neurons.length;
+/** Ölü olmayan her nöron için Izh (naive); şu an yalnızca aktiflerde Izh adımı. */
+function computeIzhiWorkloadFull() {
+  let traditional = 0;
   let current = 0;
   for (const n of neurons) {
+    if (n.life === "dead") continue;
+    traditional++;
+    if (n.life === "active") current++;
+  }
+  const savingsPct =
+    traditional > 0 ? (1 - current / traditional) * 100 : 0;
+  return { traditional, current, savingsPct };
+}
+
+/** Conway kapısı yalnızca gizlide: naive = tüm yaşayan gizli; şu an = gizlide aktif. */
+function computeIzhiWorkloadHiddenGate() {
+  let traditional = 0;
+  let current = 0;
+  for (const n of neurons) {
+    if (n.layer !== "hidden") continue;
+    if (n.life === "dead") continue;
+    traditional++;
     if (n.life === "active") current++;
   }
   const savingsPct =
@@ -827,7 +857,11 @@ function collectLiveSnapshot(frame, nowMs, spikesLast) {
   const li = layerStats("input");
   const lh = layerStats("hidden");
   const lo = layerStats("output");
-  const eff = computeIzhiWorkloadMetrics();
+  const effFull = computeIzhiWorkloadFull();
+  const effHidden =
+    CFG.layeredLayout && CFG.ioComputeAlwaysOn
+      ? computeIzhiWorkloadHiddenGate()
+      : null;
   const caMode =
     CFG.conwayNeighborMetric === "alive" ? "aktif komşu" : "spike";
   return {
@@ -839,7 +873,8 @@ function collectLiveSnapshot(frame, nowMs, spikesLast) {
     in: li,
     hid: lh,
     out: lo,
-    eff,
+    effFull,
+    effHidden,
     caMode,
     rebuildEvery: clampSynapseRebuildEveryFrames(
       CFG.synapseRebuildEveryFrames,
@@ -873,11 +908,27 @@ function updateLivePanelDom(snap) {
     `${snap.in.meanV.toFixed(1)} | ${snap.hid.meanV.toFixed(1)} | ${snap.out.meanV.toFixed(1)}`,
   );
   set("stat-last-i", lastManualINote);
-  if (snap.eff) {
-    set("stat-eff-traditional", String(snap.eff.traditional));
-    set("stat-eff-current", String(snap.eff.current));
+  if (snap.effFull) {
+    set(
+      "stat-eff-naive",
+      `${snap.effFull.traditional} / ${snap.effFull.current}`,
+    );
+    set(
+      "stat-eff-naive-sav",
+      `${snap.effFull.savingsPct.toFixed(1)} %`,
+    );
+  }
+  if (snap.effHidden) {
+    set(
+      "stat-eff-hid",
+      `${snap.effHidden.traditional} / ${snap.effHidden.current}`,
+    );
     const se = document.getElementById("stat-eff-savings");
-    if (se) se.textContent = `${snap.eff.savingsPct.toFixed(1)} %`;
+    if (se) se.textContent = `${snap.effHidden.savingsPct.toFixed(1)} %`;
+  } else {
+    set("stat-eff-hid", "—");
+    const se = document.getElementById("stat-eff-savings");
+    if (se) se.textContent = "—";
   }
 }
 
@@ -912,7 +963,106 @@ function syncMouseAttractCheckbox() {
   if (cb) cb.checked = CFG.mouseAttractOn;
 }
 
+function readPanelManualI() {
+  const raw = document.getElementById("manual-I");
+  const v = raw ? parseFloat(String(raw.value)) : NaN;
+  return Number.isFinite(v) ? v : CFG.sustainedInputIValue;
+}
+
+function syncSustainedIValueFromPanel() {
+  CFG.sustainedInputIValue = readPanelManualI();
+}
+
+function clampPanelInt(id, lo, hi, fallback) {
+  const el = document.getElementById(id);
+  const v = el ? parseInt(String(el.value), 10) : NaN;
+  if (!Number.isFinite(v)) return fallback;
+  return Math.max(lo, Math.min(hi, v));
+}
+
+function writePanelInt(id, val) {
+  const el = document.getElementById(id);
+  if (el) el.value = String(val);
+}
+
+function readTopologyFromPanelIntoCfg() {
+  CFG.inputCount = clampPanelInt("cfg-input-count", 2, 32, CFG.inputCount);
+  CFG.hiddenClusters = clampPanelInt(
+    "cfg-hidden-clusters",
+    1,
+    12,
+    CFG.hiddenClusters,
+  );
+  CFG.hiddenPerCluster = clampPanelInt(
+    "cfg-hidden-per-cluster",
+    1,
+    24,
+    CFG.hiddenPerCluster,
+  );
+  CFG.outputCount = clampPanelInt(
+    "cfg-output-count",
+    1,
+    32,
+    CFG.outputCount,
+  );
+}
+
+function syncTopologyInputsFromCfg() {
+  writePanelInt("cfg-input-count", CFG.inputCount);
+  writePanelInt("cfg-hidden-clusters", CFG.hiddenClusters);
+  writePanelInt("cfg-hidden-per-cluster", CFG.hiddenPerCluster);
+  writePanelInt("cfg-output-count", CFG.outputCount);
+}
+
+function resetSimulationFromPanel() {
+  if (!tezP5Ref) return;
+  resetNeurons(tezP5Ref.width, tezP5Ref.height);
+}
+
+let _panelDomWired = false;
+
 function wirePanelControls() {
+  if (_panelDomWired) return;
+  _panelDomWired = true;
+
+  syncTopologyInputsFromCfg();
+
+  const manualIn = document.getElementById("manual-I");
+  if (manualIn) {
+    manualIn.value = String(CFG.sustainedInputIValue);
+    manualIn.addEventListener("input", () => {
+      syncSustainedIValueFromPanel();
+    });
+    manualIn.addEventListener("change", () => {
+      syncSustainedIValueFromPanel();
+    });
+  }
+
+  const sustainedCb = document.getElementById("sustained-i-cb");
+  if (sustainedCb) {
+    sustainedCb.checked = CFG.sustainedInputFromPanel;
+    sustainedCb.addEventListener("change", () => {
+      CFG.sustainedInputFromPanel = sustainedCb.checked;
+      syncSustainedIValueFromPanel();
+    });
+  }
+
+  document.getElementById("btn-apply-topology")?.addEventListener("click", () => {
+    readTopologyFromPanelIntoCfg();
+    syncTopologyInputsFromCfg();
+    resetSimulationFromPanel();
+  });
+
+  const inj = () => {
+    syncSustainedIValueFromPanel();
+    injectInputLayerCurrent(readPanelManualI(), 950);
+  };
+  document.getElementById("btn-inject")?.addEventListener("click", inj);
+
+  document.getElementById("btn-reset")?.addEventListener("click", () => {
+    resetSimulationFromPanel();
+  });
+
   const r = document.getElementById("gen-period-range");
   const lbl = document.getElementById("gen-period-label");
   if (r) {
@@ -952,12 +1102,36 @@ function wirePanelControls() {
       );
       rin.value = String(CFG.synapseRebuildEveryFrames);
     };
+    rin.addEventListener("input", rsync);
     rin.addEventListener("change", rsync);
     rin.value = String(
       clampSynapseRebuildEveryFrames(CFG.synapseRebuildEveryFrames),
     );
     rsync();
   }
+}
+
+/** Sol panel sabit genişlik; tuval `#p5-root` kalan görünüm alanına sığar */
+function fallbackCanvasPixelSize() {
+  return {
+    w: Math.min(920, Math.max(400, window.innerWidth - 290)),
+    h: Math.min(620, Math.max(300, window.innerHeight - 140)),
+  };
+}
+
+function computeCanvasSizeFromStage() {
+  const el = document.getElementById("p5-root");
+  if (!el) return fallbackCanvasPixelSize();
+  const r = el.getBoundingClientRect();
+  const m = 6;
+  let w = Math.floor(r.width - m * 2);
+  let h = Math.floor(r.height - m * 2);
+  if (w < 120 || h < 120 || !Number.isFinite(w) || !Number.isFinite(h)) {
+    return fallbackCanvasPixelSize();
+  }
+  w = Math.max(260, Math.min(1920, w));
+  h = Math.max(220, Math.min(1200, h));
+  return { w, h };
 }
 
 function resetNeurons(w, h) {
@@ -974,22 +1148,36 @@ function resetNeurons(w, h) {
 function sketch(p) {
   p.setup = function () {
     const stage = document.getElementById("p5-root");
-    const sw = Math.min(920, Math.max(520, window.innerWidth - 300));
-    const sh = Math.min(620, Math.max(380, window.innerHeight - 160));
-    p.createCanvas(sw, sh);
-    resetNeurons(p.width, p.height);
+    function applyCanvasToStage() {
+      const { w: cw, h: ch } = computeCanvasSizeFromStage();
+      const hasCanvas = !!p.canvas;
+      if (!hasCanvas) {
+        p.createCanvas(cw, ch);
+        resetNeurons(p.width, p.height);
+        return;
+      }
+      if (cw !== p.width || ch !== p.height) {
+        p.resizeCanvas(cw, ch);
+        resetNeurons(p.width, p.height);
+      }
+    }
+
+    applyCanvasToStage();
+
+    requestAnimationFrame(() => {
+      applyCanvasToStage();
+    });
+
+    if (stage && typeof ResizeObserver !== "undefined") {
+      new ResizeObserver(() => {
+        applyCanvasToStage();
+      }).observe(stage);
+    }
+
     const c = document.querySelector("#p5-root canvas");
     if (c) c.setAttribute("tabindex", "0");
 
-    const inj = () => {
-      const raw = document.getElementById("manual-I");
-      const v = raw ? parseFloat(raw.value) : 24;
-      injectInputLayerCurrent(Number.isFinite(v) ? v : 24, 950);
-    };
-    document.getElementById("btn-inject")?.addEventListener("click", inj);
-    document.getElementById("btn-reset")?.addEventListener("click", () => {
-      resetNeurons(p.width, p.height);
-    });
+    tezP5Ref = p;
 
     window.tezSimulation = {
       injectInputLayerCurrent: injectInputLayerCurrent,
@@ -1016,13 +1204,14 @@ function sketch(p) {
     };
 
     wirePanelControls();
+    syncSustainedIValueFromPanel();
     updateLivePanelDom(collectLiveSnapshot(0, performance.now(), 0));
   };
 
   p.windowResized = function () {
-    const sw = Math.min(920, Math.max(520, window.innerWidth - 300));
-    const sh = Math.min(620, Math.max(380, window.innerHeight - 160));
-    p.resizeCanvas(sw, sh);
+    const { w, h } = computeCanvasSizeFromStage();
+    if (w === p.width && h === p.height) return;
+    p.resizeCanvas(w, h);
     resetNeurons(p.width, p.height);
   };
 
@@ -1082,7 +1271,8 @@ function sketch(p) {
       syncMouseAttractCheckbox();
     }
     else if (k === "i") {
-      injectInputLayerCurrent(22, 800);
+      syncSustainedIValueFromPanel();
+      injectInputLayerCurrent(readPanelManualI(), 800);
     }
   };
 }

@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Conway + Izhikevich 3D Visualizer</title>
+  <!-- OrbitControls.js imports the bare specifier "three"; map it for browser ESM -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.166.1/build/three.module.js"
+    }
+  }
+  </script>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #070a11;
+      --panel: #111724;
+      --border: #263147;
+      --text: #d8e1f4;
+      --muted: #95a5c6;
+      --accent: #7de7ff;
+      --good: #6ff1a3;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; }
+    body {
+      background: radial-gradient(circle at 10% 10%, #0f1830 0%, var(--bg) 48%);
+      color: var(--text);
+      font-family: "Segoe UI", system-ui, sans-serif;
+    }
+    .layout {
+      width: 100%;
+      height: 100%;
+      display: grid;
+      grid-template-columns: minmax(280px, 320px) 1fr;
+      gap: 10px;
+      padding: 10px;
+    }
+    .panel {
+      background: linear-gradient(180deg, rgba(20, 31, 50, 0.95), rgba(14, 20, 33, 0.95));
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
+      overflow: auto;
+    }
+    .panel h1 {
+      margin: 0 0 8px;
+      font-size: 0.96rem;
+      font-weight: 600;
+      letter-spacing: 0.03em;
+    }
+    .panel h2 {
+      margin: 14px 0 8px;
+      font-size: 0.72rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    .row {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 8px;
+      margin: 6px 0;
+      font-size: 0.83rem;
+    }
+    .lbl { color: var(--muted); }
+    .val { color: var(--accent); font-variant-numeric: tabular-nums; text-align: right; }
+    .val-good { color: var(--good); font-weight: 600; }
+    input[type="text"], input[type="number"], button, select {
+      width: 100%;
+      border: 1px solid #33435f;
+      background: #0d1422;
+      color: #d8e1f4;
+      border-radius: 8px;
+      padding: 7px 8px;
+      font-size: 0.8rem;
+      margin-top: 4px;
+    }
+    button {
+      cursor: pointer;
+      background: #16263f;
+    }
+    button.row-inline { width: auto; margin-top: 6px; padding: 6px 10px; }
+    .btn-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+    .btn-row button { flex: 1; min-width: 0; margin-top: 0; }
+    .hint {
+      margin-top: 12px;
+      font-size: 0.75rem;
+      line-height: 1.45;
+      color: #9fb0d4;
+    }
+    .viewport {
+      position: relative;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+      min-width: 0;
+    }
+    #canvas-root { width: 100%; height: 100%; touch-action: none; }
+    .badge {
+      position: absolute;
+      right: 10px;
+      top: 10px;
+      background: rgba(6, 12, 22, 0.75);
+      border: 1px solid #32415f;
+      border-radius: 999px;
+      padding: 5px 10px;
+      font-size: 0.72rem;
+      color: #bfd0f4;
+    }
+    .chk-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 8px;
+      font-size: 0.78rem;
+    }
+    .chk-row input { width: auto; margin-top: 0; }
+    label.lbl-block { display: block; margin-top: 8px; font-size: 0.72rem; color: var(--muted); }
+    input[type="range"] { width: 100%; margin-top: 4px; }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <aside class="panel">
+      <h1>Conway + Izhikevich 3D</h1>
+      <div class="row"><span class="lbl">Durum</span><span class="val" id="stat-connection">Baglaniyor...</span></div>
+      <div class="row"><span class="lbl">FPS</span><span class="val" id="stat-fps">-</span></div>
+      <div class="row"><span class="lbl">Jenerasyon</span><span class="val" id="stat-step">-</span></div>
+      <div class="row"><span class="lbl">Gen hiz (Hz)</span><span class="val" id="stat-hz">-</span></div>
+      <div class="row"><span class="lbl">Canli hucre</span><span class="val" id="stat-alive">-</span></div>
+      <div class="row"><span class="lbl">Spike</span><span class="val" id="stat-spikes">-</span></div>
+      <div class="row"><span class="lbl">Bag sayisi</span><span class="val" id="stat-edges">-</span></div>
+      <div class="row"><span class="lbl">Efficiency</span><span class="val val-good" id="stat-efficiency">-</span></div>
+
+      <h2>Kamera</h2>
+      <div class="chk-row">
+        <input type="checkbox" id="cb-auto-rotate" />
+        <label for="cb-auto-rotate">Otomatik donus</label>
+      </div>
+      <div class="btn-row">
+        <button type="button" id="btn-reset-camera">Gorusu sifirla</button>
+      </div>
+
+      <h2>Kalite</h2>
+      <label class="lbl-block" for="select-quality">Oncelik</label>
+      <select id="select-quality">
+        <option value="low">Dusuk (FPS)</option>
+        <option value="medium" selected>Orta</option>
+        <option value="high">Yuksek</option>
+      </select>
+
+      <h2>Kurallar ve Metrikler</h2>
+      <div class="row"><span class="lbl">Dogum</span><span class="val" id="stat-birth">B3</span></div>
+      <div class="row"><span class="lbl">Yasam</span><span class="val" id="stat-survival">S23</span></div>
+      <label class="lbl" for="input-birth">Dogum komsulari (orn: 3)</label>
+      <input id="input-birth" type="text" value="3" />
+      <label class="lbl" for="input-survive">Yasam komsulari (orn: 2,3)</label>
+      <input id="input-survive" type="text" value="2,3" />
+      <button id="btn-apply-rules" type="button">Kurallari uygula</button>
+      <label class="lbl" for="input-generation-ms">Jenerasyon suresi (ms)</label>
+      <input id="input-generation-ms" type="number" min="1" max="1000" value="50" />
+      <button id="btn-apply-speed" type="button">Hizi uygula</button>
+
+      <h2>Eslesme (Coupling)</h2>
+      <label class="lbl-block" for="rng-k-alive">k_alive <span id="lbl-k-alive">4</span></label>
+      <input id="rng-k-alive" type="range" min="0" max="12" step="0.25" value="4" />
+      <label class="lbl-block" for="rng-k-neighbors">k_neighbors <span id="lbl-k-neighbors">0.5</span></label>
+      <input id="rng-k-neighbors" type="range" min="0" max="3" step="0.05" value="0.5" />
+      <label class="lbl-block" for="rng-bias">bias <span id="lbl-bias">0.5</span></label>
+      <input id="rng-bias" type="range" min="-2" max="2" step="0.05" value="0.5" />
+      <label class="lbl-block" for="rng-k-syn">k_syn (graf izi) <span id="lbl-k-syn">2.80</span></label>
+      <input id="rng-k-syn" type="range" min="0" max="12" step="0.1" value="2.8" />
+      <label class="lbl-block" for="rng-trace-decay">spike_trace sönüm γ <span id="lbl-trace-decay">0.88</span></label>
+      <input id="rng-trace-decay" type="range" min="0.55" max="0.99" step="0.005" value="0.88" />
+      <div class="chk-row">
+        <input type="checkbox" id="cb-feedback" checked />
+        <label for="cb-feedback">Feedback (spike -&gt; GoL)</label>
+      </div>
+      <div class="chk-row">
+        <input type="checkbox" id="cb-graph-feedback-nbors" checked />
+        <label for="cb-graph-feedback-nbors">GoL revive: graf komsulari (C)</label>
+      </div>
+      <button id="btn-apply-coupling" type="button">Coupling uygula</button>
+      <button id="btn-reset-grid" type="button" class="secondary">Izgarayi sifirla</button>
+
+      <h2>Metrikler</h2>
+      <div class="row"><span class="lbl">Stability</span><span class="val" id="stat-stability">-</span></div>
+      <div class="row"><span class="lbl">Information</span><span class="val" id="stat-information">-</span></div>
+      <div class="row"><span class="lbl">Memory</span><span class="val" id="stat-memory">-</span></div>
+      <div class="row"><span class="lbl">Cost</span><span class="val" id="stat-cost">-</span></div>
+      <div class="hint">
+        Sol surukle: dondur. Teker: yaklas. Sag surukle: pan.<br />
+        Kisa tiklama (suruklemeden): manuel spike. Shift+tik: Conway toggle.<br />
+        API: <code>http://127.0.0.1:8765</code>
+      </div>
+    </aside>
+    <section class="viewport">
+      <div id="canvas-root"></div>
+      <div class="badge">Raycast: kisa tiklama</div>
+    </section>
+  </div>
+  <script type="module" src="./main.js"></script>
+</body>
+</html>
