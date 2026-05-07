@@ -121,6 +121,32 @@
     .chk-row input { width: auto; margin-top: 0; }
     label.lbl-block { display: block; margin-top: 8px; font-size: 0.72rem; color: var(--muted); }
     input[type="range"] { width: 100%; margin-top: 4px; }
+    .topology-list {
+      max-height: 168px;
+      overflow-y: auto;
+      border: 1px solid #2a3551;
+      border-radius: 8px;
+      padding: 6px 8px;
+      background: #0c1320;
+      margin-top: 6px;
+    }
+    .topology-list .chk-row { margin-top: 4px; }
+    .topology-list .chk-row label { cursor: pointer; }
+    .topology-list .chk-row .kind-tag {
+      margin-left: auto;
+      font-size: 0.66rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--muted);
+      border: 1px solid #2a3551;
+      padding: 1px 6px;
+      border-radius: 999px;
+    }
+    .topology-status {
+      margin-top: 6px;
+      font-size: 0.72rem;
+      color: var(--muted);
+    }
   </style>
 </head>
 <body>
@@ -135,6 +161,15 @@
       <div class="row"><span class="lbl">Spike</span><span class="val" id="stat-spikes">-</span></div>
       <div class="row"><span class="lbl">Bag sayisi</span><span class="val" id="stat-edges">-</span></div>
       <div class="row"><span class="lbl">Efficiency</span><span class="val val-good" id="stat-efficiency">-</span></div>
+
+      <h2>Topoloji Seçimi</h2>
+      <div class="topology-list" id="topology-list" aria-label="Topoloji secimi">
+        <div class="topology-status" id="topology-status">Yukleniyor...</div>
+      </div>
+      <div class="btn-row">
+        <button type="button" id="btn-load-topology">Topolojileri Yukle ve Calistir</button>
+      </div>
+      <div class="topology-status" id="topology-active">Aktif: -</div>
 
       <h2>Kamera</h2>
       <div class="chk-row">

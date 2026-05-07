@@ -20,6 +20,9 @@ from conway_izh.config import CouplingParams, SimulationConfig
 from conway_izh.grid import NeuralGrid
 from conway_izh.viz import StreamBridge, StreamPublisher, StreamServer
 
+# Default SWC catalogue lives under <repo>/data/morphology
+_DEFAULT_SWC_DIR = _project_root / "data" / "morphology"
+
 
 def parse_args():
     """Parse command line arguments."""
@@ -61,6 +64,27 @@ def parse_args():
                         help="Live mode: matplotlib UI or JSON stream server")
     parser.add_argument("--host", type=str, default="127.0.0.1", help="Host for stream mode")
     parser.add_argument("--port", type=int, default=8765, help="Port for stream mode")
+    parser.add_argument(
+        "--swc-dir",
+        type=str,
+        default=str(_DEFAULT_SWC_DIR),
+        help="Directory containing SWC morphology files (stream mode only)",
+    )
+    parser.add_argument(
+        "--topology",
+        type=str,
+        default=None,
+        help=(
+            "Initial topology selection for stream mode, comma-separated. "
+            "Example: small_world,granule_test,pyramidal_test"
+        ),
+    )
+    parser.add_argument(
+        "--small-world-n",
+        type=int,
+        default=3600,
+        help="Node count for the small-world component (topology mode)",
+    )
 
     return parser.parse_args()
 
@@ -196,37 +220,73 @@ Coupling:
 
 
 class StreamSimulation:
-    """Headless loop that publishes per-step JSON frames for Three.js."""
+    """Headless loop that publishes per-step JSON frames for Three.js.
 
-    def __init__(self, grid: NeuralGrid, publisher: StreamPublisher):
+    The loop is grid-agnostic; it reads ``self.publisher.is_topology_mode``
+    each iteration to pick the right ``manual_spike`` / ``toggle_conway``
+    callbacks, and asks the publisher whether a new grid was queued by a
+    ``set_topology`` control.
+    """
+
+    def __init__(self, grid, publisher: StreamPublisher):
         self.grid = grid
         self.publisher = publisher
         self.step_count = 0
         self.max_steps = grid.config.steps
-        self.cell_count = grid.config.height * grid.config.width
+
+    def _make_callbacks(self):
+        grid = self.grid
+        is_graph = bool(getattr(self.publisher, "is_topology_mode", False))
+
+        if is_graph:
+            def manual_spike(index: int):
+                if 0 <= index < grid.n_nodes:
+                    grid.v[index] = 35.0
+
+            def toggle_conway(index: int):
+                if 0 <= index < grid.n_nodes:
+                    grid.gol_state[index] = 0 if grid.gol_state[index] else 1
+            return manual_spike, toggle_conway
+
+        width = grid.config.width
+
+        def manual_spike(index: int):
+            row, col = divmod(index, width)
+            grid.v[row, col] = 35.0
+
+        def toggle_conway(index: int):
+            row, col = divmod(index, width)
+            grid.gol_state[row, col] = 0 if grid.gol_state[row, col] else 1
+
+        return manual_spike, toggle_conway
 
     def run(self, interval_ms: int):
         print("Starting stream simulation mode...")
-        print(f"Grid size: {self.grid.config.height}x{self.grid.config.width}")
+        if getattr(self.publisher, "is_topology_mode", False):
+            print(f"Topology mode: N={self.grid.n_nodes} nodes, "
+                  f"selection={self.publisher.current_selection}")
+        else:
+            print(f"Grid size: {self.grid.config.height}x{self.grid.config.width}")
         print(f"Steps: {self.max_steps}")
         print("HTTP stream endpoint: http://127.0.0.1:8765/state")
         print("-" * 50)
         while self.step_count < self.max_steps:
-            def manual_spike(index: int):
-                row = index // self.grid.config.width
-                col = index % self.grid.config.width
-                # Tıklama ile her hücrede zorlayıcı ateşleme (görsel + Izh tepkisi)
-                self.grid.v[row, col] = 35.0
-
-            def toggle_conway(index: int):
-                row = index // self.grid.config.width
-                col = index % self.grid.config.width
-                self.grid.gol_state[row, col] = 0 if self.grid.gol_state[row, col] else 1
-
+            manual_spike, toggle_conway = self._make_callbacks()
             self.publisher.apply_controls(self.grid, manual_spike, toggle_conway)
+
+            # Topology hot-swap: if the front-end requested a new selection
+            # the publisher has already built the new grid; we replace our
+            # local reference *before* stepping so we never step a dead grid.
+            next_grid = self.publisher.consume_pending_grid()
+            if next_grid is not None:
+                self.grid = next_grid
+                self.max_steps = max(self.max_steps, self.grid.config.steps)
+
             metrics, spikes = self.grid.step()
             self.step_count += 1
-            self.publisher.bridge.set_state(self.publisher.payload(self.grid, metrics, spikes))
+            self.publisher.bridge.set_state(
+                self.publisher.payload(self.grid, metrics, spikes)
+            )
             if self.step_count % 50 == 0:
                 print(
                     f"Step {self.step_count}/{self.max_steps}: "
@@ -265,19 +325,45 @@ def main():
         save_gif=False,
     )
 
-    grid = NeuralGrid(config)
-
     if args.mode == "matplotlib":
+        grid = NeuralGrid(config)
         live_sim = LiveSimulation(grid)
         live_sim.run(interval=args.interval)
         return
 
+    swc_dir = Path(args.swc_dir).resolve()
+
+    initial_selection: list[str] = []
+    if args.topology:
+        initial_selection = [
+            s.strip() for s in args.topology.split(",") if s.strip()
+        ]
+
+    if initial_selection:
+        # Boot directly into topology mode so the first frame already
+        # carries node_coords for the front-end.
+        from conway_izh.graph_grid import GraphNeuralGrid
+        from conway_izh.topology_manager import build_unified_topology
+
+        topology = build_unified_topology(
+            initial_selection,
+            swc_dir=swc_dir,
+            small_world_n=int(args.small_world_n),
+            small_world_k=int(config.small_world_k),
+            small_world_rewire=float(config.small_world_rewire),
+            seed=config_seed,
+        )
+        grid = GraphNeuralGrid(config, topology)
+    else:
+        grid = NeuralGrid(config)
+
     bridge = StreamBridge()
-    publisher = StreamPublisher(bridge, grid)
+    publisher = StreamPublisher(bridge, grid, swc_dir=swc_dir)
     publisher.generation_period_ms = max(1, args.interval)
-    server = StreamServer(bridge, args.host, args.port)
+    server = StreamServer(bridge, args.host, args.port, swc_dir=swc_dir)
     server.start()
     print(f"Control server running at http://{args.host}:{args.port}")
+    print(f"SWC catalogue: {swc_dir}")
 
     try:
         stream = StreamSimulation(grid, publisher)

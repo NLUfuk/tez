@@ -139,6 +139,8 @@ export class HybridVisualizer {
     this.gridW = 0;
     this.gridH = 0;
     this.nodeCount = 0;
+    this.topologyMode = false;
+    this.topologyVersion = -1;
 
     this.positions = null;
     this.colors = null;
@@ -148,6 +150,10 @@ export class HybridVisualizer {
     this.spikeMask = null;
     this.graphEdges = [];
     this.graphVersion = -1;
+    // Reusable Box3 / Vector3 to avoid per-frame allocations.
+    this._boundsBox = new THREE.Box3();
+    this._boundsCenter = new THREE.Vector3();
+    this._boundsSize = new THREE.Vector3();
 
     this.points = null;
     this.pointGeometry = null;
@@ -344,12 +350,83 @@ export class HybridVisualizer {
     return data;
   }
 
-  _initPointCloud(width, height) {
+  /**
+   * Tear down every GPU-resident object the visualizer ever allocated.
+   *
+   * Critical on a 4 GB GTX 1650: switching topology pulls the rug under
+   * potentially millions of vertex/edge bytes. Without explicit dispose()
+   * Three.js leaks them to the WebGL context, and within a few swaps the
+   * driver throws CONTEXT_LOST and the page goes blank.
+   *
+   * Call this BEFORE allocating new buffers in :meth:`_initPointCloud`.
+   */
+  _disposeNodeAndEdgeResources() {
+    if (this.points) {
+      this.scene.remove(this.points);
+      this.points = null;
+    }
+    if (this.pointGeometry) {
+      this.pointGeometry.dispose();
+      this.pointGeometry = null;
+    }
+    if (this.pointMaterial) {
+      this.pointMaterial.dispose();
+      this.pointMaterial = null;
+    }
+    if (this.baseLineSegments) {
+      this.scene.remove(this.baseLineSegments);
+      this.baseLineSegments.material?.dispose?.();
+      this.baseLineSegments = null;
+    }
+    if (this.baseLineGeometry) {
+      this.baseLineGeometry.dispose();
+      this.baseLineGeometry = null;
+    }
+    if (this.activeLineSegments) {
+      this.scene.remove(this.activeLineSegments);
+      this.activeLineSegments.material?.dispose?.();
+      this.activeLineSegments = null;
+    }
+    if (this.activeLineGeometry) {
+      this.activeLineGeometry.dispose();
+    }
+    // Drop CPU-side caches too: they'd otherwise pin RAM after a swap.
+    this.positions = null;
+    this.colors = null;
+    this.sizes = null;
+    this.flash = null;
+    this.alive = null;
+    this.spikeMask = null;
+    this.graphEdges = [];
+    this.graphVersion = -1;
+    this.topologyVersion = -1;
+    this.cooldownByEdge.clear();
+    this._pulseUntil.clear();
+
+    this.activeLineGeometry = new THREE.BufferGeometry();
+    this.activeLinePositions = null;
+    this.activeLineColors = null;
+  }
+
+  /**
+   * Allocate every CPU-side Float32Array and BufferGeometry the renderer
+   * needs. Reuses the *same* shader material and Points/Lines mesh
+   * structure across both rectangular (small-world) and topology modes
+   * so the cyan / gold / red visual rules stay consistent.
+   */
+  _initPointCloud(nodeCount, positions, opts = {}) {
+    const { width = 0, height = 0, topology = false } = opts;
+    this._disposeNodeAndEdgeResources();
+
+    this.nodeCount = nodeCount;
     this.gridW = width;
     this.gridH = height;
-    this.nodeCount = width * height;
+    this.topologyMode = topology;
 
-    this.positions = this._createOrganicPositions(width, height);
+    this.positions =
+      positions instanceof Float32Array
+        ? positions
+        : new Float32Array(positions);
     this.colors = new Float32Array(this.nodeCount * 3);
     this.sizes = new Float32Array(this.nodeCount);
     this.flash = new Float32Array(this.nodeCount);
@@ -398,13 +475,107 @@ export class HybridVisualizer {
     this.graphEdges = [];
   }
 
+  /**
+   * Initialise the rectangular (small-world / GoL) mode using the
+   * existing organic-disk node placement. Kept as a thin wrapper so the
+   * legacy frame format keeps working unchanged.
+   */
+  _initRectangularPointCloud(width, height) {
+    const positions = this._createOrganicPositions(width, height);
+    this._initPointCloud(width * height, positions, { width, height, topology: false });
+  }
+
+  /**
+   * Initialise topology mode using the flat ``node_coords`` array sent by
+   * the backend (3 floats per node, X/Y/Z). The renderer never allocates
+   * per-vertex Vector3/Color objects: we copy straight into the Float32
+   * positions attribute and let the GPU consume it.
+   */
+  _initTopologyPointCloud(nodeCount, flatCoords) {
+    const positions = new Float32Array(nodeCount * 3);
+    const src = flatCoords;
+    const lim = Math.min(positions.length, src.length);
+    for (let i = 0; i < lim; i++) positions[i] = src[i];
+    this._initPointCloud(nodeCount, positions, { topology: true });
+    this._fitCameraToScene();
+  }
+
+  /**
+   * Compute an enclosing Box3 over current positions and move the camera
+   * so the whole topology is visible without manual zoom.
+   *
+   * Algorithm:
+   *   1. Walk the positions Float32Array once to compute min/max per axis.
+   *   2. Use the larger of the bbox extents and the FOV to derive the
+   *      required Z distance.
+   *   3. Push the camera back along its current view direction.
+   */
+  _fitCameraToScene() {
+    if (!this.positions || this.positions.length < 3) return;
+    const box = this._boundsBox.makeEmpty();
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+    for (let i = 0; i < this.positions.length; i += 3) {
+      const x = this.positions[i];
+      const y = this.positions[i + 1];
+      const z = this.positions[i + 2];
+      if (x < minX) minX = x; if (x > maxX) maxX = x;
+      if (y < minY) minY = y; if (y > maxY) maxY = y;
+      if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+    }
+    box.set(
+      new THREE.Vector3(minX, minY, minZ),
+      new THREE.Vector3(maxX, maxY, maxZ),
+    );
+    box.getCenter(this._boundsCenter);
+    box.getSize(this._boundsSize);
+
+    const maxExtent = Math.max(
+      this._boundsSize.x,
+      this._boundsSize.y,
+      this._boundsSize.z,
+      1,
+    );
+    const fov = THREE.MathUtils.degToRad(this.camera.fov);
+    // Standard fit-camera trig: distance so half-extent subtends half-FOV,
+    // padded 1.4x to leave breathing room for bloom and labels.
+    const distance = (maxExtent * 0.5) / Math.tan(fov * 0.5) * 1.4;
+
+    const target = this._boundsCenter.clone();
+    const dir = new THREE.Vector3(0.4, 0.55, 1).normalize();
+    const eye = target.clone().add(dir.multiplyScalar(distance));
+
+    this.camera.position.copy(eye);
+    this.camera.near = Math.max(0.1, distance * 0.005);
+    this.camera.far = distance * 5.0 + 1000;
+    this.camera.updateProjectionMatrix();
+    this.controls.target.copy(target);
+    this.controls.minDistance = Math.max(8, distance * 0.05);
+    this.controls.maxDistance = distance * 4.0;
+    this.controls.update();
+
+    // Persist the topology-fit camera as the new "reset" pose so the
+    // "Görüşü sıfırla" button returns to the right view.
+    this._defaultCameraPos = eye.clone();
+    this._defaultTarget = target.clone();
+  }
+
   _setGraph(graph) {
     if (!graph) return;
+    const version = Number(graph.version ?? 0);
     const hasEdges = Array.isArray(graph.edges) && graph.edges.length > 0;
+    // Only refresh when a fresh edge set arrives or the version differs.
     if (!hasEdges) {
+      // First-time topology swap: backend may send empty edges if no
+      // morphology has parents (degenerate). Keep the empty list to
+      // avoid leaving stale edges from the previous topology on screen.
+      if (version !== this.graphVersion) {
+        this.graphVersion = version;
+        this.graphEdges = [];
+        this._rebuildBaseEdgesFromGraph();
+      }
       return;
     }
-    const version = Number(graph.version ?? 0);
     if (version === this.graphVersion && this.graphEdges.length) {
       return;
     }
@@ -545,9 +716,37 @@ export class HybridVisualizer {
   }
 
   applyFrame(frame) {
-    const { width, height, gol_state: golState, spikes, graph } = frame;
-    if (!this.points || width !== this.gridW || height !== this.gridH) {
-      this._initPointCloud(width, height);
+    const {
+      width,
+      height,
+      n_nodes: frameNodes,
+      gol_state: golState,
+      spikes,
+      graph,
+      topology,
+    } = frame;
+
+    const useTopology = !!topology?.active;
+    const desiredVersion = Number(topology?.version ?? -1);
+
+    if (useTopology) {
+      const incomingNodes = Number(
+        topology?.n_nodes ?? frameNodes ?? (Array.isArray(golState) ? golState.length : 0),
+      );
+      const versionChanged = desiredVersion !== this.topologyVersion;
+      const sizeChanged = !this.points || incomingNodes !== this.nodeCount || !this.topologyMode;
+      if (Array.isArray(topology.node_coords) && topology.node_coords.length >= incomingNodes * 3) {
+        if (versionChanged || sizeChanged) {
+          this._initTopologyPointCloud(incomingNodes, topology.node_coords);
+          this.topologyVersion = desiredVersion;
+        }
+      } else if (sizeChanged) {
+        // Coords were not in this frame (cached on backend); keep the old
+        // mesh until coords arrive on a heartbeat frame to avoid a flash.
+        return;
+      }
+    } else if (!this.points || width !== this.gridW || height !== this.gridH || this.topologyMode) {
+      this._initRectangularPointCloud(width, height);
     }
     this._setGraph(graph);
 

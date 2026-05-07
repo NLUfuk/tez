@@ -11,6 +11,12 @@ from typing import Callable, Deque, Dict, List, Optional, Sequence, Tuple
 import imageio
 from conway_izh.conway import initialize_conway
 from conway_izh.izhikevich import initialize_izhikevich
+from conway_izh.topology_manager import (
+    SMALL_WORLD_KEY,
+    UnifiedTopology,
+    build_unified_topology,
+    discover_topologies,
+)
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -191,8 +197,13 @@ def create_small_world_graph(
     return list(edge_set)
 
 
-def build_control_handler(bridge: StreamBridge):
-    """Build an HTTP handler bound to a bridge instance."""
+def build_control_handler(bridge: StreamBridge, *, swc_dir: Optional[Path] = None):
+    """Build an HTTP handler bound to a bridge instance.
+
+    If ``swc_dir`` is supplied the handler exposes ``GET /topologies``
+    listing the available networks (small-world + every ``.swc`` file).
+    """
+    swc_path = Path(swc_dir).resolve() if swc_dir is not None else None
 
     class StreamHandler(BaseHTTPRequestHandler):
         def _write_json(self, status: int, payload: Dict):
@@ -210,14 +221,32 @@ def build_control_handler(bridge: StreamBridge):
             self._write_json(HTTPStatus.OK, {"ok": True})
 
         def do_GET(self):
-            if self.path != "/state":
-                self._write_json(HTTPStatus.NOT_FOUND, {"error": "Not Found"})
+            if self.path == "/state":
+                payload = bridge.get_state()
+                if payload is None:
+                    self._write_json(HTTPStatus.OK, {"ready": False})
+                    return
+                self._write_json(HTTPStatus.OK, payload)
                 return
-            payload = bridge.get_state()
-            if payload is None:
-                self._write_json(HTTPStatus.OK, {"ready": False})
+            if self.path == "/topologies":
+                if swc_path is None:
+                    self._write_json(HTTPStatus.OK, {
+                        "options": [{
+                            "key": SMALL_WORLD_KEY,
+                            "label": "Mevcut Topoloji (Rastgele Small-World)",
+                            "kind": "small_world",
+                        }],
+                    })
+                    return
+                opts = discover_topologies(swc_path)
+                self._write_json(HTTPStatus.OK, {
+                    "options": [
+                        {"key": o.key, "label": o.label, "kind": o.kind}
+                        for o in opts
+                    ],
+                })
                 return
-            self._write_json(HTTPStatus.OK, payload)
+            self._write_json(HTTPStatus.NOT_FOUND, {"error": "Not Found"})
 
         def do_POST(self):
             if self.path != "/control":
@@ -246,9 +275,18 @@ def build_control_handler(bridge: StreamBridge):
 class StreamServer:
     """Thin wrapper around HTTP server lifecycle."""
 
-    def __init__(self, bridge: StreamBridge, host: str, port: int):
+    def __init__(
+        self,
+        bridge: StreamBridge,
+        host: str,
+        port: int,
+        *,
+        swc_dir: Optional[Path] = None,
+    ):
         self._bridge = bridge
-        self._server = ThreadingHTTPServer((host, port), build_control_handler(bridge))
+        self._server = ThreadingHTTPServer(
+            (host, port), build_control_handler(bridge, swc_dir=swc_dir)
+        )
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
 
     def start(self):
@@ -261,20 +299,80 @@ class StreamServer:
 
 
 class StreamPublisher:
-    """Publishes simulation state and applies live control updates."""
+    """Publishes simulation state and applies live control updates.
 
-    def __init__(self, bridge: StreamBridge, grid):
-        """Uses ``grid.graph_edges`` as canonical topology (physics + viz)."""
+    The publisher is grid-agnostic: it can wrap either a classic
+    :class:`conway_izh.grid.NeuralGrid` (rectangular ``H × W`` mode) or a
+    :class:`conway_izh.graph_grid.GraphNeuralGrid` (arbitrary topology
+    mode). It exposes :py:meth:`set_grid` so the host loop can hot-swap
+    the active engine when the front-end issues a ``set_topology``
+    control. The wire payload always mirrors whichever grid is currently
+    attached.
+    """
+
+    def __init__(
+        self,
+        bridge: StreamBridge,
+        grid,
+        *,
+        swc_dir: Optional[Path] = None,
+        topology: Optional[UnifiedTopology] = None,
+    ):
+        """``grid`` may be a ``NeuralGrid`` or ``GraphNeuralGrid``.
+
+        ``swc_dir`` is required to support hot-swap to topology mode.
+        """
         self.bridge = bridge
-        self.grid = grid
-        self.width = int(grid.config.width)
-        self.height = int(grid.config.height)
-        self.node_count = self.width * self.height
+        self.swc_dir: Optional[Path] = (
+            Path(swc_dir).resolve() if swc_dir is not None else None
+        )
         self.generation_period_ms = 50
-        self.birth_neighbors: Tuple[int, ...] = tuple(grid.config.birth_neighbors)
-        self.survive_neighbors: Tuple[int, ...] = tuple(grid.config.survive_neighbors)
         self.graph_version = 1
         self._sent_graph_payload_version = -1
+        self._sent_coords_version = -1
+        self.topology: Optional[UnifiedTopology] = topology
+        self.current_selection: List[str] = []
+        self._pending_grid = None  # set by set_grid; main loop swaps in
+        self._set_grid_internal(grid)
+
+    # -- attachment ----------------------------------------------------------
+
+    def _set_grid_internal(self, grid) -> None:
+        """Bind to a new grid object and reset cached metadata."""
+        self.grid = grid
+        if hasattr(grid, "topology") and grid.topology is not None:
+            self.topology = grid.topology
+            self.node_count = int(grid.n_nodes)
+            self.width = int(grid.n_nodes)
+            self.height = 1
+            self.current_selection = list(self.topology.selection)
+            self.is_topology_mode = True
+        else:
+            self.topology = None
+            self.width = int(grid.config.width)
+            self.height = int(grid.config.height)
+            self.node_count = self.width * self.height
+            self.current_selection = [SMALL_WORLD_KEY]
+            self.is_topology_mode = False
+        self.birth_neighbors: Tuple[int, ...] = tuple(grid.config.birth_neighbors)
+        self.survive_neighbors: Tuple[int, ...] = tuple(grid.config.survive_neighbors)
+        self.graph_version += 1
+        self._sent_graph_payload_version = -1
+        self._sent_coords_version = -1
+
+    def consume_pending_grid(self):
+        """Return any grid queued by :py:meth:`set_grid` and clear the slot.
+
+        The simulation loop should call this once per step; if a new grid is
+        returned the loop must replace its local reference *before* invoking
+        ``step()`` to avoid mixing state across topologies.
+        """
+        if self._pending_grid is None:
+            return None
+        next_grid = self._pending_grid
+        self._pending_grid = None
+        self._set_grid_internal(next_grid)
+        return next_grid
 
     def apply_controls(
         self,
@@ -323,31 +421,91 @@ class StreamPublisher:
             elif action == "reset_grid":
                 raw_seed = control.get("seed")
                 s = int(raw_seed) if raw_seed is not None else grid.config.seed
-                grid.gol_state = initialize_conway(
-                    grid.config.height, grid.config.width, s
-                )
-                grid.v, grid.u = initialize_izhikevich(
-                    (grid.config.height, grid.config.width), s
-                )
-                grid.previous_spikes[:] = False
-                grid.memory_state[:] = 0.0
-                grid.strategy_map[:] = 1
-                new_edges = create_small_world_graph(
-                    self.node_count,
-                    k_neighbors=grid.config.small_world_k,
-                    rewire_prob=grid.config.small_world_rewire,
-                    seed=s,
-                )
-                grid.attach_graph_edges(new_edges)
+                if self.is_topology_mode and hasattr(grid, "reset_state"):
+                    grid.reset_state(s)
+                else:
+                    grid.gol_state = initialize_conway(
+                        grid.config.height, grid.config.width, s
+                    )
+                    grid.v, grid.u = initialize_izhikevich(
+                        (grid.config.height, grid.config.width), s
+                    )
+                    grid.previous_spikes[:] = False
+                    grid.memory_state[:] = 0.0
+                    grid.strategy_map[:] = 1
+                    new_edges = create_small_world_graph(
+                        self.node_count,
+                        k_neighbors=grid.config.small_world_k,
+                        rewire_prob=grid.config.small_world_rewire,
+                        seed=s,
+                    )
+                    grid.attach_graph_edges(new_edges)
                 self.graph_version += 1
                 self._sent_graph_payload_version = -1
+                self._sent_coords_version = -1
+            elif action == "set_topology":
+                self._handle_set_topology(control, grid)
+
+    def _handle_set_topology(self, control: Dict, grid) -> None:
+        """Build a new GraphNeuralGrid for the requested selection.
+
+        The newly built grid is queued via ``_pending_grid`` so the
+        simulation loop swaps it in atomically *between* steps – this
+        avoids mid-step shape mismatches.
+
+        Refusing to swap (no swc_dir, empty selection, ...) is silent on
+        purpose; the front-end keeps the previous topology running.
+        """
+        if self.swc_dir is None:
+            return
+        from conway_izh.graph_grid import GraphNeuralGrid
+
+        raw_selection = control.get("selection") or control.get("topologies") or []
+        if not isinstance(raw_selection, (list, tuple)):
+            return
+        cleaned = [str(s).strip() for s in raw_selection if str(s).strip()]
+        if not cleaned:
+            cleaned = [SMALL_WORLD_KEY]
+
+        seed = control.get("seed")
+        try:
+            seed_val = int(seed) if seed is not None else grid.config.seed
+        except (TypeError, ValueError):
+            seed_val = grid.config.seed
+
+        small_world_n = int(control.get("small_world_n", 3600))
+        small_world_n = max(50, min(small_world_n, 20000))
+
+        try:
+            topology = build_unified_topology(
+                cleaned,
+                swc_dir=self.swc_dir,
+                small_world_n=small_world_n,
+                small_world_k=int(grid.config.small_world_k),
+                small_world_rewire=float(grid.config.small_world_rewire),
+                seed=seed_val,
+                axis_step=float(control.get("axis_step", 200.0)),
+            )
+        except Exception:
+            # Build failures should not crash the streaming loop; just keep
+            # serving the previous grid.
+            return
+
+        next_grid = GraphNeuralGrid(grid.config, topology)
+        self._pending_grid = next_grid
 
     def payload(self, grid, metrics: Dict, spikes: np.ndarray) -> Dict:
         step_idx = int(metrics["step"])
+        topology_kind = "topology" if self.is_topology_mode else "small_world"
         graph_payload: Dict = {
             "version": self.graph_version,
-            "kind": "small_world",
+            "kind": topology_kind,
         }
+
+        # We re-send heavy fields (edges + coords) only when the topology
+        # version actually changes, plus every ~300 steps as a heartbeat
+        # safety net. This keeps each frame on the wire small and lets the
+        # browser dispose() old GL buffers exactly when needed.
         send_edges = (
             self.graph_version != self._sent_graph_payload_version
             or step_idx % 300 == 0
@@ -358,12 +516,43 @@ class StreamPublisher:
             ]
             self._sent_graph_payload_version = self.graph_version
 
+        topology_payload: Optional[Dict] = None
+        if self.is_topology_mode and self.topology is not None:
+            send_coords = (
+                self.graph_version != self._sent_coords_version
+                or step_idx % 300 == 0
+            )
+            topology_payload = {
+                "active": True,
+                "selection": list(self.current_selection),
+                "components": list(self.topology.components),
+                "n_nodes": int(self.topology.n_nodes),
+                "bbox_min": self.topology.bbox_min.tolist(),
+                "bbox_max": self.topology.bbox_max.tolist(),
+                "version": self.graph_version,
+            }
+            if send_coords:
+                # Flat Float32-friendly array; the browser will read it
+                # straight into a Float32Array (no per-vertex object alloc).
+                topology_payload["node_coords"] = (
+                    self.topology.coords.astype(np.float32, copy=False)
+                    .ravel()
+                    .tolist()
+                )
+                self._sent_coords_version = self.graph_version
+        else:
+            topology_payload = {"active": False}
+
+        gol_flat = np.asarray(grid.gol_state).astype(np.uint8, copy=False).ravel()
+        spike_flat = np.asarray(spikes).astype(np.uint8, copy=False).ravel()
+
         return {
             "ready": True,
             "width": self.width,
             "height": self.height,
-            "gol_state": grid.gol_state.astype(np.uint8).ravel().tolist(),
-            "spikes": spikes.astype(np.uint8).ravel().tolist(),
+            "n_nodes": int(self.node_count),
+            "gol_state": gol_flat.tolist(),
+            "spikes": spike_flat.tolist(),
             "metrics": {
                 "step": int(metrics["step"]),
                 "alive_count": int(metrics["alive_count"]),
@@ -379,6 +568,7 @@ class StreamPublisher:
                 "survive": list(self.survive_neighbors),
             },
             "graph": graph_payload,
+            "topology": topology_payload,
             "generation_period_ms": self.generation_period_ms,
             "coupling": {
                 "k_alive": float(grid.config.coupling.k_alive),

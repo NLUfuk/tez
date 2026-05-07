@@ -50,9 +50,81 @@ const cbFeedback = document.getElementById("cb-feedback");
 const cbGraphFeedbackNbors = document.getElementById("cb-graph-feedback-nbors");
 const btnApplyCoupling = document.getElementById("btn-apply-coupling");
 const btnResetGrid = document.getElementById("btn-reset-grid");
+const topologyList = document.getElementById("topology-list");
+const topologyStatus = document.getElementById("topology-status");
+const topologyActive = document.getElementById("topology-active");
+const btnLoadTopology = document.getElementById("btn-load-topology");
+
+const FALLBACK_TOPOLOGIES = [
+  { key: "small_world", label: "Mevcut Topoloji (Rastgele Small-World)", kind: "small_world" },
+  { key: "granule_test", label: "granule_test", kind: "swc" },
+  { key: "medium_spiniy_test", label: "medium_spiniy_test", kind: "swc" },
+  { key: "pyramidal_test", label: "pyramidal_test", kind: "swc" },
+];
 
 function setText(el, value) {
   if (el) el.textContent = value;
+}
+
+/**
+ * Render the topology checkbox list. The DOM is rebuilt only when the option
+ * set actually changes; user checked-state is preserved across re-renders.
+ */
+function renderTopologyList(options) {
+  if (!topologyList) return;
+  const previousChecked = new Set(getSelectedTopologyKeys());
+  topologyList.innerHTML = "";
+  if (!options || !options.length) {
+    topologyList.innerHTML = "<div class=\"topology-status\">Topoloji listesi bos</div>";
+    return;
+  }
+  options.forEach((opt, idx) => {
+    const row = document.createElement("div");
+    row.className = "chk-row";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.id = `topo-cb-${opt.key}`;
+    cb.dataset.topologyKey = opt.key;
+    if (previousChecked.size) {
+      cb.checked = previousChecked.has(opt.key);
+    } else {
+      cb.checked = idx === 0;
+    }
+    const lbl = document.createElement("label");
+    lbl.htmlFor = cb.id;
+    lbl.textContent = opt.label || opt.key;
+    const tag = document.createElement("span");
+    tag.className = "kind-tag";
+    tag.textContent = opt.kind === "swc" ? "SWC" : "GRAF";
+    row.appendChild(cb);
+    row.appendChild(lbl);
+    row.appendChild(tag);
+    topologyList.appendChild(row);
+  });
+}
+
+function getSelectedTopologyKeys() {
+  if (!topologyList) return [];
+  const out = [];
+  topologyList.querySelectorAll("input[type=\"checkbox\"]").forEach((cb) => {
+    if (cb.checked && cb.dataset.topologyKey) out.push(cb.dataset.topologyKey);
+  });
+  return out;
+}
+
+async function fetchTopologyOptions() {
+  try {
+    const res = await fetch(`${API_BASE}/topologies`, { cache: "no-store" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (Array.isArray(data?.options) && data.options.length) {
+      return data.options;
+    }
+  } catch (_err) {
+    // Backend may be older or briefly down; keep the static fallback so the
+    // UI is always usable.
+  }
+  return FALLBACK_TOPOLOGIES;
 }
 
 async function postControl(body) {
@@ -129,6 +201,13 @@ function updateStats(payload, viz) {
     inputGenerationMs.value = String(payload.generation_period_ms);
   }
   syncCouplingSlidersFromPayload(payload.coupling);
+  if (topologyActive) {
+    if (payload.topology?.active && Array.isArray(payload.topology.selection)) {
+      topologyActive.textContent = `Aktif: ${payload.topology.selection.join(", ")} (${payload.topology.n_nodes} dugum)`;
+    } else {
+      topologyActive.textContent = "Aktif: small-world (klasik)";
+    }
+  }
 }
 
 async function bootstrap() {
@@ -182,6 +261,32 @@ async function bootstrap() {
 
   btnResetGrid?.addEventListener("click", async () => {
     await postControl({ action: "reset_grid" });
+  });
+
+  // Topology selection wiring
+  if (topologyStatus) topologyStatus.textContent = "Yukleniyor...";
+  fetchTopologyOptions().then((opts) => {
+    renderTopologyList(opts);
+    if (topologyStatus) topologyStatus.style.display = "none";
+  });
+
+  btnLoadTopology?.addEventListener("click", async () => {
+    const selection = getSelectedTopologyKeys();
+    if (!selection.length) {
+      if (topologyActive) topologyActive.textContent = "Aktif: -";
+      return;
+    }
+    btnLoadTopology.disabled = true;
+    btnLoadTopology.textContent = "Yukleniyor...";
+    try {
+      await postControl({ action: "set_topology", selection });
+      if (topologyActive) topologyActive.textContent = `Yukleniyor: ${selection.join(", ")}`;
+    } finally {
+      setTimeout(() => {
+        btnLoadTopology.disabled = false;
+        btnLoadTopology.textContent = "Topolojileri Yukle ve Calistir";
+      }, 250);
+    }
   });
 
   container.addEventListener("pointerdown", (e) => {
