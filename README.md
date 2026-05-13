@@ -20,6 +20,7 @@ This simulation implements:
 The stream pipeline now supports topology selection from the UI:
 
 - `small_world` (existing random topology)
+- `legacy_cluster` (legacy-style dense core + sparse periphery graph)
 - SWC files from `data/morphology/` (e.g. `granule_test`, `medium_spiniy_test`, `pyramidal_test`)
 
 At runtime, selected topologies are loaded and merged by a topology manager:
@@ -113,6 +114,26 @@ python -m http.server 5173 --directory web
 Open:
 
 - `http://127.0.0.1:5173/three_visualizer/index.html`
+
+#### One-command full stack startup (Windows PowerShell)
+
+If you want backend + frontend to run together every time:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\start_full_stack.ps1
+```
+
+Useful overrides:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\start_full_stack.ps1 `
+  -BackendPort 8765 -FrontendPort 5173 `
+  -Topology "small_world,granule_test,pyramidal_test" `
+  -SmallWorldN 2000 -Interval 40 -Steps 100000
+```
+
+The script keeps both services alive and stops both on `Ctrl+C`.
+Logs are written under `outputs/live_logs/`.
 
 #### Stream mode (new topology flags)
 

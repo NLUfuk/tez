@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="tr">
+<html lang="tr" data-theme="dark">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -13,40 +13,156 @@
   }
   </script>
   <style>
-    :root {
+    /* ------------------------------------------------------------------
+     * Theme tokens. Defaults are dark; [data-theme="light"] overrides.
+     * Keep semantic names so the viewport, panels and per-topology cards
+     * stay in sync when the user toggles the theme.
+     * ------------------------------------------------------------------ */
+    :root,
+    :root[data-theme="dark"] {
       color-scheme: dark;
       --bg: #070a11;
+      --bg-grad: radial-gradient(circle at 10% 10%, #0f1830 0%, #070a11 48%);
       --panel: #111724;
-      --border: #263147;
+      --panel-grad: linear-gradient(180deg, rgba(20, 31, 50, 0.95), rgba(14, 20, 33, 0.95));
+      --panel-border: #263147;
+      --section-border: #2a3551;
+      --input-bg: #0d1422;
+      --input-border: #33435f;
+      --button-bg: #16263f;
+      --button-bg-hover: #1d3052;
       --text: #d8e1f4;
+      --text-soft: #bfd0f4;
       --muted: #95a5c6;
+      --hint: #9fb0d4;
       --accent: #7de7ff;
       --good: #6ff1a3;
+      --warn: #f6c97e;
+      --bad: #ff7a8a;
+      --card-bg: #0c1320;
+      --card-border: #2a3551;
+      --shadow-strong: 0 6px 26px rgba(0, 0, 0, 0.45);
+      --badge-bg: rgba(6, 12, 22, 0.75);
+      --badge-border: #32415f;
+      /* Viewport canvas backdrop. Kept aligned with the Three.js scene
+       * background in THEME_PRESETS so there is no rim mismatch around
+       * the rounded viewport. */
+      --viewport-bg: #090618;
+      --viewport-border: #263147;
+      /* Overlay labels live above the WebGL canvas; they always sit on a
+       * dark backdrop, so readable defaults stay constant across themes. */
+      --overlay-bg: rgba(6, 12, 22, 0.78);
+      --overlay-border: #32415f;
+      --overlay-text: #d8e1f4;
+      --overlay-muted: #95a5c6;
     }
+    :root[data-theme="light"] {
+      color-scheme: light;
+      --bg: #eef2fa;
+      --bg-grad: radial-gradient(circle at 10% 10%, #f8faff 0%, #dbe3f1 48%);
+      --panel: #ffffff;
+      --panel-grad: linear-gradient(180deg, #ffffff, #f1f4fb);
+      --panel-border: #c5cfe1;
+      --section-border: #d4dceb;
+      --input-bg: #ffffff;
+      --input-border: #c2cce0;
+      --button-bg: #e7edf8;
+      --button-bg-hover: #d6deec;
+      --text: #1b2536;
+      --text-soft: #2d3a52;
+      --muted: #56688a;
+      --hint: #4a5b7c;
+      --accent: #0f7aaf;
+      --good: #0f8a55;
+      --warn: #b76e00;
+      --bad: #b21e3a;
+      --card-bg: #f6f8fd;
+      --card-border: #d4dceb;
+      --shadow-strong: 0 6px 26px rgba(33, 53, 88, 0.18);
+      --badge-bg: rgba(255, 255, 255, 0.92);
+      --badge-border: #c5cfe1;
+      /* Viewport stays dark in light mode (see comment in THEME_PRESETS):
+       * UnrealBloomPass washes out anything brighter than its threshold,
+       * so we keep an HDR-friendly canvas while the surrounding UI is
+       * light. The border picks up the panel chrome so the rounded edge
+       * still reads as part of the light layout. */
+      --viewport-bg: #141a2b;
+      --viewport-border: #c5cfe1;
+      --overlay-bg: rgba(20, 26, 43, 0.82);
+      --overlay-border: #3a4566;
+      --overlay-text: #eef2fa;
+      --overlay-muted: #b4c0dc;
+    }
+
     * { box-sizing: border-box; }
     html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; }
     body {
-      background: radial-gradient(circle at 10% 10%, #0f1830 0%, var(--bg) 48%);
+      background: var(--bg-grad);
+      background-color: var(--bg);
       color: var(--text);
       font-family: "Segoe UI", system-ui, sans-serif;
+      transition: background-color 180ms ease, color 180ms ease;
     }
+
+    /* ------------------------------------------------------------------
+     * Three-column layout: [left controls | viewport | right metrics].
+     * Splitting the legacy single sidebar in two cuts the vertical scroll
+     * roughly in half so the most-used widgets stay in view.
+     * On narrower viewports we collapse to two columns, then to one.
+     * ------------------------------------------------------------------ */
     .layout {
       width: 100%;
       height: 100%;
       display: grid;
-      grid-template-columns: minmax(280px, 320px) 1fr;
+      grid-template-columns: minmax(250px, 290px) 1fr minmax(260px, 320px);
+      grid-template-rows: 1fr;
       gap: 10px;
       padding: 10px;
     }
+    /* Tighten side columns first so the viewport keeps a usable area on
+     * 1366 / 1440 wide laptops without losing the per-topology panel. */
+    @media (max-width: 1366px) {
+      .layout { grid-template-columns: 240px 1fr 260px; }
+    }
+    /* Below ~1080px the right sidebar moves *under* the viewport instead of
+     * being hidden, so per-topology metrics remain reachable on tablets. */
+    @media (max-width: 1080px) {
+      .layout {
+        grid-template-columns: minmax(240px, 280px) 1fr;
+        grid-template-rows: 1fr auto;
+      }
+      .panel-right {
+        grid-column: 1 / -1;
+        max-height: 32vh;
+      }
+    }
+    /* Phone-sized: stack everything; the viewport takes the remaining
+     * height while sidebars get a soft cap to stay scrollable. */
+    @media (max-width: 720px) {
+      .layout { grid-template-columns: 1fr; grid-template-rows: auto 1fr auto; }
+      .panel-left, .panel-right { max-height: 32vh; }
+    }
+
     .panel {
-      background: linear-gradient(180deg, rgba(20, 31, 50, 0.95), rgba(14, 20, 33, 0.95));
-      border: 1px solid var(--border);
+      background: var(--panel-grad);
+      border: 1px solid var(--panel-border);
       border-radius: 12px;
       padding: 12px;
       overflow: auto;
+      box-shadow: var(--shadow-strong);
+      transition: background 180ms ease, border-color 180ms ease;
+    }
+    .panel-left, .panel-right { min-width: 0; }
+
+    .panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin: 0 0 8px;
     }
     .panel h1 {
-      margin: 0 0 8px;
+      margin: 0;
       font-size: 0.96rem;
       font-weight: 600;
       letter-spacing: 0.03em;
@@ -57,7 +173,10 @@
       letter-spacing: 0.12em;
       text-transform: uppercase;
       color: var(--muted);
+      border-bottom: 1px solid var(--section-border);
+      padding-bottom: 4px;
     }
+
     .row {
       display: flex;
       justify-content: space-between;
@@ -69,48 +188,75 @@
     .lbl { color: var(--muted); }
     .val { color: var(--accent); font-variant-numeric: tabular-nums; text-align: right; }
     .val-good { color: var(--good); font-weight: 600; }
+    .val-warn { color: var(--warn); font-weight: 600; }
+    .val-bad { color: var(--bad); font-weight: 600; }
+
     input[type="text"], input[type="number"], button, select {
       width: 100%;
-      border: 1px solid #33435f;
-      background: #0d1422;
-      color: #d8e1f4;
+      border: 1px solid var(--input-border);
+      background: var(--input-bg);
+      color: var(--text);
       border-radius: 8px;
       padding: 7px 8px;
       font-size: 0.8rem;
       margin-top: 4px;
+      transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease;
     }
     button {
       cursor: pointer;
-      background: #16263f;
+      background: var(--button-bg);
     }
+    button:hover { background: var(--button-bg-hover); }
     button.row-inline { width: auto; margin-top: 6px; padding: 6px 10px; }
     .btn-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
     .btn-row button { flex: 1; min-width: 0; margin-top: 0; }
+
+    /* Theme toggle is a small icon button in the panel header so it stays
+     * accessible without taking sidebar real estate. */
+    .theme-toggle {
+      width: auto;
+      margin: 0;
+      padding: 4px 9px;
+      font-size: 0.75rem;
+      border-radius: 999px;
+      background: var(--button-bg);
+      border: 1px solid var(--input-border);
+      color: var(--text);
+    }
+
     .hint {
       margin-top: 12px;
       font-size: 0.75rem;
       line-height: 1.45;
-      color: #9fb0d4;
+      color: var(--hint);
     }
+    .hint code { color: var(--accent); }
+
     .viewport {
       position: relative;
-      border: 1px solid var(--border);
+      border: 1px solid var(--viewport-border);
       border-radius: 12px;
       overflow: hidden;
       min-width: 0;
+      /* Match the Three.js scene background so the rounded corners do not
+       * flash a different color before the WebGL canvas first paints. */
+      background: var(--viewport-bg);
+      box-shadow: var(--shadow-strong);
     }
     #canvas-root { width: 100%; height: 100%; touch-action: none; }
     .badge {
       position: absolute;
       right: 10px;
       top: 10px;
-      background: rgba(6, 12, 22, 0.75);
-      border: 1px solid #32415f;
+      background: var(--overlay-bg);
+      border: 1px solid var(--overlay-border);
       border-radius: 999px;
       padding: 5px 10px;
       font-size: 0.72rem;
-      color: #bfd0f4;
+      color: var(--overlay-text);
+      pointer-events: none;
     }
+
     .chk-row {
       display: flex;
       align-items: center;
@@ -121,13 +267,14 @@
     .chk-row input { width: auto; margin-top: 0; }
     label.lbl-block { display: block; margin-top: 8px; font-size: 0.72rem; color: var(--muted); }
     input[type="range"] { width: 100%; margin-top: 4px; }
+
     .topology-list {
       max-height: 168px;
       overflow-y: auto;
-      border: 1px solid #2a3551;
+      border: 1px solid var(--section-border);
       border-radius: 8px;
       padding: 6px 8px;
-      background: #0c1320;
+      background: var(--card-bg);
       margin-top: 6px;
     }
     .topology-list .chk-row { margin-top: 4px; }
@@ -138,7 +285,7 @@
       letter-spacing: 0.06em;
       text-transform: uppercase;
       color: var(--muted);
-      border: 1px solid #2a3551;
+      border: 1px solid var(--section-border);
       padding: 1px 6px;
       border-radius: 999px;
     }
@@ -147,12 +294,106 @@
       font-size: 0.72rem;
       color: var(--muted);
     }
+
+    /* ------------------------------------------------------------------
+     * Per-topology metric cards. One card per active component, color
+     * accent matches the 3D scene swatch sent by the backend.
+     * ------------------------------------------------------------------ */
+    .per-topo-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 8px;
+      margin-top: 6px;
+    }
+    .per-topo-card {
+      border: 1px solid var(--card-border);
+      border-left: 4px solid var(--accent);
+      border-radius: 10px;
+      background: var(--card-bg);
+      padding: 8px 10px;
+    }
+    .per-topo-card .pt-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      margin-bottom: 4px;
+    }
+    .per-topo-card .pt-title {
+      font-size: 0.82rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }
+    .per-topo-card .pt-tag {
+      font-size: 0.62rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--muted);
+      border: 1px solid var(--section-border);
+      padding: 1px 6px;
+      border-radius: 999px;
+    }
+    .per-topo-card .pt-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 0.74rem;
+      margin: 2px 0;
+    }
+    .per-topo-card .pt-row .lbl { color: var(--muted); }
+    .per-topo-card .pt-row .val { color: var(--text-soft); font-variant-numeric: tabular-nums; }
+    .per-topo-card .pt-row .val.eff { color: var(--good); font-weight: 600; }
+    .per-topo-empty {
+      font-size: 0.74rem;
+      color: var(--muted);
+      padding: 6px 4px;
+    }
+
+    /* Floating overlay labels anchored to each component centroid in the
+     * 3D scene. Pure HTML/CSS, projected by main.js once per frame. */
+    .topo-overlay-host {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+    }
+    .topo-overlay-label {
+      position: absolute;
+      transform: translate(-50%, -100%);
+      background: var(--overlay-bg);
+      border: 1px solid var(--overlay-border);
+      border-left: 3px solid var(--accent);
+      color: var(--overlay-text);
+      font-size: 0.72rem;
+      padding: 4px 8px;
+      border-radius: 8px;
+      white-space: nowrap;
+      box-shadow: var(--shadow-strong);
+      backdrop-filter: blur(2px);
+      max-width: 220px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .topo-overlay-label .ov-title {
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }
+    .topo-overlay-label .ov-sub {
+      color: var(--overlay-muted);
+      font-size: 0.66rem;
+      margin-top: 1px;
+    }
   </style>
 </head>
 <body>
   <div class="layout">
-    <aside class="panel">
-      <h1>Conway + Izhikevich 3D</h1>
+    <!-- ============================== LEFT PANEL ============================== -->
+    <aside class="panel panel-left">
+      <div class="panel-header">
+        <h1>Conway + Izhikevich 3D</h1>
+        <button id="btn-theme-toggle" type="button" class="theme-toggle" aria-label="Tema degistir">
+          <span id="theme-toggle-label">Acik</span>
+        </button>
+      </div>
       <div class="row"><span class="lbl">Durum</span><span class="val" id="stat-connection">Baglaniyor...</span></div>
       <div class="row"><span class="lbl">FPS</span><span class="val" id="stat-fps">-</span></div>
       <div class="row"><span class="lbl">Jenerasyon</span><span class="val" id="stat-step">-</span></div>
@@ -162,7 +403,7 @@
       <div class="row"><span class="lbl">Bag sayisi</span><span class="val" id="stat-edges">-</span></div>
       <div class="row"><span class="lbl">Efficiency</span><span class="val val-good" id="stat-efficiency">-</span></div>
 
-      <h2>Topoloji Seçimi</h2>
+      <h2>Topoloji Secimi</h2>
       <div class="topology-list" id="topology-list" aria-label="Topoloji secimi">
         <div class="topology-status" id="topology-status">Yukleniyor...</div>
       </div>
@@ -188,7 +429,7 @@
         <option value="high">Yuksek</option>
       </select>
 
-      <h2>Kurallar ve Metrikler</h2>
+      <h2>Kurallar</h2>
       <div class="row"><span class="lbl">Dogum</span><span class="val" id="stat-birth">B3</span></div>
       <div class="row"><span class="lbl">Yasam</span><span class="val" id="stat-survival">S23</span></div>
       <label class="lbl" for="input-birth">Dogum komsulari (orn: 3)</label>
@@ -196,9 +437,39 @@
       <label class="lbl" for="input-survive">Yasam komsulari (orn: 2,3)</label>
       <input id="input-survive" type="text" value="2,3" />
       <button id="btn-apply-rules" type="button">Kurallari uygula</button>
+
+      <h2>Hiz</h2>
       <label class="lbl" for="input-generation-ms">Jenerasyon suresi (ms)</label>
       <input id="input-generation-ms" type="number" min="1" max="1000" value="50" />
-      <button id="btn-apply-speed" type="button">Hizi uygula</button>
+      <div class="btn-row">
+        <button id="btn-apply-speed" type="button">Hizi uygula</button>
+        <button id="btn-toggle-pause" type="button">Durdur</button>
+      </div>
+    </aside>
+
+    <!-- ============================== VIEWPORT ============================== -->
+    <section class="viewport">
+      <div id="canvas-root"></div>
+      <div class="topo-overlay-host" id="topo-overlay-host" aria-hidden="true"></div>
+      <div class="badge">Raycast: kisa tiklama</div>
+    </section>
+
+    <!-- ============================== RIGHT PANEL ============================== -->
+    <aside class="panel panel-right" id="panel-right">
+      <div class="panel-header">
+        <h1>Topoloji Metrikleri</h1>
+      </div>
+      <div class="per-topo-grid" id="per-topo-grid">
+        <div class="per-topo-empty" id="per-topo-empty">
+          Tek bilesen calisiyor. Birden fazla topoloji secip <em>Yukle ve Calistir</em>'a basildiginda her topoloji icin ayri kart burada gorunur.
+        </div>
+      </div>
+
+      <h2>Genel Metrikler</h2>
+      <div class="row"><span class="lbl">Stability</span><span class="val" id="stat-stability">-</span></div>
+      <div class="row"><span class="lbl">Information</span><span class="val" id="stat-information">-</span></div>
+      <div class="row"><span class="lbl">Memory</span><span class="val" id="stat-memory">-</span></div>
+      <div class="row"><span class="lbl">Cost</span><span class="val" id="stat-cost">-</span></div>
 
       <h2>Eslesme (Coupling)</h2>
       <label class="lbl-block" for="rng-k-alive">k_alive <span id="lbl-k-alive">4</span></label>
@@ -209,7 +480,7 @@
       <input id="rng-bias" type="range" min="-2" max="2" step="0.05" value="0.5" />
       <label class="lbl-block" for="rng-k-syn">k_syn (graf izi) <span id="lbl-k-syn">2.80</span></label>
       <input id="rng-k-syn" type="range" min="0" max="12" step="0.1" value="2.8" />
-      <label class="lbl-block" for="rng-trace-decay">spike_trace sönüm γ <span id="lbl-trace-decay">0.88</span></label>
+      <label class="lbl-block" for="rng-trace-decay">spike_trace sonum &gamma; <span id="lbl-trace-decay">0.88</span></label>
       <input id="rng-trace-decay" type="range" min="0.55" max="0.99" step="0.005" value="0.88" />
       <div class="chk-row">
         <input type="checkbox" id="cb-feedback" checked />
@@ -219,24 +490,18 @@
         <input type="checkbox" id="cb-graph-feedback-nbors" checked />
         <label for="cb-graph-feedback-nbors">GoL revive: graf komsulari (C)</label>
       </div>
-      <button id="btn-apply-coupling" type="button">Coupling uygula</button>
-      <button id="btn-reset-grid" type="button" class="secondary">Izgarayi sifirla</button>
+      <div class="btn-row">
+        <button id="btn-apply-coupling" type="button">Coupling uygula</button>
+        <button id="btn-reset-grid" type="button">Izgarayi sifirla</button>
+      </div>
 
-      <h2>Metrikler</h2>
-      <div class="row"><span class="lbl">Stability</span><span class="val" id="stat-stability">-</span></div>
-      <div class="row"><span class="lbl">Information</span><span class="val" id="stat-information">-</span></div>
-      <div class="row"><span class="lbl">Memory</span><span class="val" id="stat-memory">-</span></div>
-      <div class="row"><span class="lbl">Cost</span><span class="val" id="stat-cost">-</span></div>
+      <h2>Yardim</h2>
       <div class="hint">
         Sol surukle: dondur. Teker: yaklas. Sag surukle: pan.<br />
         Kisa tiklama (suruklemeden): manuel spike. Shift+tik: Conway toggle.<br />
         API: <code>http://127.0.0.1:8765</code>
       </div>
     </aside>
-    <section class="viewport">
-      <div id="canvas-root"></div>
-      <div class="badge">Raycast: kisa tiklama</div>
-    </section>
   </div>
   <script type="module" src="./main.js"></script>
 </body>

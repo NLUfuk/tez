@@ -1,4 +1,11 @@
-"""Visualization and stream publishing for Conway-Izhikevich simulation."""
+"""Visualization and stream publishing for Conway-Izhikevich simulation.
+
+Hot-path note: stream mode never touches matplotlib or imageio. Keeping
+those imports module-level used to add ~0.7-1.5 s to cold start because
+matplotlib eagerly builds its font cache and imageio probes its plugin
+registry. The heavy imports are now lazy: they are paid only when a save
+function is actually called (i.e. ``run_grid.py`` or notebook flows).
+"""
 
 import json
 import threading
@@ -8,28 +15,37 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable, Deque, Dict, List, Optional, Sequence, Tuple
 
-import imageio
+import numpy as np
+
 from conway_izh.conway import initialize_conway
+from conway_izh.efficiency import (
+    compute_cost_score,
+    compute_efficiency_score,
+    compute_information_score,
+    compute_memory_score,
+    compute_stability_score,
+)
 from conway_izh.izhikevich import initialize_izhikevich
 from conway_izh.topology_manager import (
+    LEGACY_CLUSTER_KEY,
     SMALL_WORLD_KEY,
     UnifiedTopology,
     build_unified_topology,
     discover_topologies,
 )
-import matplotlib.pyplot as plt
-import numpy as np
 
 
 def save_gol_frame(state: np.ndarray, filepath: Path, cmap: str = 'gray'):
     """
     Save Conway Game of Life state as PNG.
-    
+
     Args:
         state: Binary grid (H, W)
         filepath: Output file path
         cmap: Colormap name
     """
+    import matplotlib.pyplot as plt  # lazy: skip in stream mode
+
     plt.figure(figsize=(10, 10))
     plt.imshow(state, cmap=cmap, interpolation='nearest')
     plt.title('Conway Game of Life State')
@@ -42,12 +58,14 @@ def save_gol_frame(state: np.ndarray, filepath: Path, cmap: str = 'gray'):
 def save_v_heatmap(v: np.ndarray, filepath: Path, cmap: str = 'viridis'):
     """
     Save membrane potential as heatmap.
-    
+
     Args:
         v: Membrane potential array (H, W)
         filepath: Output file path
         cmap: Colormap name
     """
+    import matplotlib.pyplot as plt  # lazy: skip in stream mode
+
     plt.figure(figsize=(10, 10))
     plt.imshow(v, cmap=cmap, interpolation='nearest')
     plt.colorbar(label='Membrane Potential (mV)')
@@ -61,23 +79,25 @@ def save_v_heatmap(v: np.ndarray, filepath: Path, cmap: str = 'viridis'):
 def save_spike_raster(spike_history: List[np.ndarray], filepath: Path):
     """
     Save spike raster plot (time x cell index).
-    
+
     Args:
         spike_history: List of spike masks (H, W) bool arrays
         filepath: Output file path
     """
     if not spike_history:
         return
-    
+
+    import matplotlib.pyplot as plt  # lazy: skip in stream mode
+
     H, W = spike_history[0].shape
     N = H * W
     T = len(spike_history)
-    
+
     # Flatten to (T, N) raster
     raster = np.zeros((T, N), dtype=bool)
     for t, spikes in enumerate(spike_history):
         raster[t, :] = spikes.flatten()
-    
+
     plt.figure(figsize=(12, 8))
     # Plot only where spikes occur
     spike_times, spike_indices = np.where(raster)
@@ -93,16 +113,16 @@ def save_spike_raster(spike_history: List[np.ndarray], filepath: Path):
 def save_metrics_csv(metrics_list: List[dict], filepath: Path):
     """
     Save metrics to CSV file.
-    
+
     Args:
         metrics_list: List of metric dictionaries
         filepath: Output CSV file path
     """
     import csv
-    
+
     if not metrics_list:
         return
-    
+
     with open(filepath, 'w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=metrics_list[0].keys())
         writer.writeheader()
@@ -112,17 +132,19 @@ def save_metrics_csv(metrics_list: List[dict], filepath: Path):
 def create_gif(frame_paths: List[Path], output_path: Path, duration: float = 0.1):
     """
     Create GIF from frame images.
-    
+
     Args:
         frame_paths: List of image file paths
         output_path: Output GIF path
         duration: Frame duration in seconds
     """
+    import imageio  # lazy: only needed when actually writing a GIF
+
     images = []
     for path in frame_paths:
         if path.exists():
             images.append(imageio.imread(path))
-    
+
     if images:
         imageio.mimsave(output_path, images, duration=duration)
 
@@ -231,11 +253,18 @@ def build_control_handler(bridge: StreamBridge, *, swc_dir: Optional[Path] = Non
             if self.path == "/topologies":
                 if swc_path is None:
                     self._write_json(HTTPStatus.OK, {
-                        "options": [{
-                            "key": SMALL_WORLD_KEY,
-                            "label": "Mevcut Topoloji (Rastgele Small-World)",
-                            "kind": "small_world",
-                        }],
+                        "options": [
+                            {
+                                "key": SMALL_WORLD_KEY,
+                                "label": "Mevcut Topoloji (Rastgele Small-World)",
+                                "kind": "small_world",
+                            },
+                            {
+                                "key": LEGACY_CLUSTER_KEY,
+                                "label": "Klasik Topoloji (Legacy Cluster)",
+                                "kind": "legacy",
+                            },
+                        ],
                     })
                     return
                 opts = discover_topologies(swc_path)
@@ -327,12 +356,18 @@ class StreamPublisher:
             Path(swc_dir).resolve() if swc_dir is not None else None
         )
         self.generation_period_ms = 50
+        self.paused = False
         self.graph_version = 1
         self._sent_graph_payload_version = -1
         self._sent_coords_version = -1
         self.topology: Optional[UnifiedTopology] = topology
         self.current_selection: List[str] = []
         self._pending_grid = None  # set by set_grid; main loop swaps in
+        # Per-component scalar memory used to compute strategy_shift
+        # locally (see ``_per_component_metrics``). The map is keyed by the
+        # 1-based slot index so re-orderings of the selection invalidate the
+        # cache automatically.
+        self._per_component_prev: Dict[int, Dict[str, float]] = {}
         self._set_grid_internal(grid)
 
     # -- attachment ----------------------------------------------------------
@@ -359,6 +394,8 @@ class StreamPublisher:
         self.graph_version += 1
         self._sent_graph_payload_version = -1
         self._sent_coords_version = -1
+        # Drop cached per-component history; component layout may have shifted.
+        self._per_component_prev = {}
 
     def consume_pending_grid(self):
         """Return any grid queued by :py:meth:`set_grid` and clear the slot.
@@ -400,6 +437,18 @@ class StreamPublisher:
             elif action == "set_generation_ms":
                 raw = int(control.get("generation_ms", self.generation_period_ms))
                 self.generation_period_ms = max(1, min(1000, raw))
+            elif action == "set_paused":
+                self.paused = bool(control.get("paused", False))
+                live_state = self.bridge.get_state()
+                if live_state is not None:
+                    live_state["paused"] = bool(self.paused)
+                    self.bridge.set_state(live_state)
+            elif action == "toggle_pause":
+                self.paused = not self.paused
+                live_state = self.bridge.get_state()
+                if live_state is not None:
+                    live_state["paused"] = bool(self.paused)
+                    self.bridge.set_state(live_state)
             elif action == "set_coupling":
                 c = grid.config.coupling
                 if "k_alive" in control:
@@ -494,6 +543,126 @@ class StreamPublisher:
         next_grid = GraphNeuralGrid(grid.config, topology)
         self._pending_grid = next_grid
 
+    def _per_component_metrics(
+        self,
+        grid,
+        gol_flat: np.ndarray,
+        spike_flat: np.ndarray,
+    ) -> List[Dict]:
+        """Compute lightweight per-topology metric snapshots.
+
+        Each entry mirrors the global ``metrics`` block but is restricted to
+        a single contiguous index slice declared in
+        ``self.topology.components``. The slice is provided by the
+        ``UnifiedTopology`` builder which guarantees indices for component
+        ``k`` live in ``[start, start + n_nodes)``.
+
+        Why backend-side and not browser-side:
+            *   We already own the spike + GoL arrays; slicing them in NumPy
+                is O(n) and uses contiguous memory.
+            *   Keeping the efficiency formula in one place (``efficiency.py``)
+                avoids a JS reimplementation and possible drift between the
+                two views.
+
+        The cooperative-strategy term is always 1.0 in graph mode (the
+        Game-Theory module is disabled) so we approximate ``strategy_shift``
+        from the per-component ``alive_ratio`` delta. This still produces a
+        meaningful information/memory contrast between SWC trees and the
+        small-world ring without inventing arbitrary state.
+
+        Returns an empty list when topology mode is inactive or no
+        component metadata is present.
+        """
+        if not self.is_topology_mode or self.topology is None:
+            return []
+        components = list(self.topology.components or [])
+        if not components:
+            return []
+
+        results: List[Dict] = []
+        v_arr = getattr(grid, "v", None)
+        mem_arr = getattr(grid, "memory_state", None)
+        coords = getattr(self.topology, "coords", None)
+        for slot, comp in enumerate(components):
+            start = int(comp.get("start", 0))
+            n_nodes = int(comp.get("n_nodes", 0))
+            if n_nodes <= 0:
+                continue
+            stop = start + n_nodes
+            gol_slice = gol_flat[start:stop]
+            spike_slice = spike_flat[start:stop]
+            denom = max(1, n_nodes)
+            alive_count = int(gol_slice.sum())
+            spike_count = int(spike_slice.sum())
+            alive_ratio = alive_count / denom
+            firing_rate = spike_count / denom
+            mean_v = (
+                float(np.asarray(v_arr[start:stop]).mean())
+                if v_arr is not None and v_arr.size >= stop
+                else 0.0
+            )
+            mean_memory = (
+                float(np.asarray(mem_arr[start:stop]).mean())
+                if mem_arr is not None and mem_arr.size >= stop
+                else 0.0
+            )
+            cooperative_ratio = 1.0
+            prev = self._per_component_prev.get(slot)
+            prev_alive_ratio = prev["alive_ratio"] if prev is not None else alive_ratio
+            strategy_shift = abs(alive_ratio - prev_alive_ratio)
+            self._per_component_prev[slot] = {"alive_ratio": alive_ratio}
+
+            stability = compute_stability_score(alive_ratio, firing_rate)
+            information = compute_information_score(
+                firing_rate, cooperative_ratio, strategy_shift
+            )
+            memory = compute_memory_score(mean_memory, strategy_shift)
+            cost = compute_cost_score(firing_rate, spike_count, n_nodes)
+            efficiency = compute_efficiency_score(stability, information, memory, cost)
+
+            center = None
+            if coords is not None and coords.shape[0] >= stop:
+                segment = coords[start:stop]
+                if segment.size:
+                    c = segment.mean(axis=0)
+                    center = [float(c[0]), float(c[1]), float(c[2])]
+
+            results.append(
+                {
+                    "key": str(comp.get("key", f"comp-{slot}")),
+                    "label": str(comp.get("label", comp.get("key", f"comp-{slot}"))),
+                    "kind": str(comp.get("kind", "swc")),
+                    "slot": slot,
+                    "start": start,
+                    "n_nodes": n_nodes,
+                    "n_edges": int(comp.get("n_edges", 0)),
+                    "color": list(comp.get("color", [1.0, 1.0, 1.0])),
+                    "offset": list(comp.get("offset", [0.0, 0.0, 0.0])),
+                    "center": center,
+                    "metrics": {
+                        "alive_count": alive_count,
+                        "alive_ratio": float(alive_ratio),
+                        "spike_count": spike_count,
+                        "firing_rate": float(firing_rate),
+                        "mean_v": mean_v,
+                        "mean_memory": mean_memory,
+                        "stability_score": float(stability),
+                        "information_score": float(information),
+                        "memory_score": float(memory),
+                        "cost_score": float(cost),
+                        "efficiency_score": float(efficiency),
+                    },
+                }
+            )
+
+        # Garbage-collect stale slot history if the selection shrank.
+        valid_slots = {entry["slot"] for entry in results}
+        for stale_slot in list(self._per_component_prev.keys()):
+            if stale_slot not in valid_slots:
+                self._per_component_prev.pop(stale_slot, None)
+
+        return results
+
     def payload(self, grid, metrics: Dict, spikes: np.ndarray) -> Dict:
         step_idx = int(metrics["step"])
         topology_kind = "topology" if self.is_topology_mode else "small_world"
@@ -511,10 +680,23 @@ class StreamPublisher:
             or step_idx % 300 == 0
         )
         if send_edges:
-            graph_payload["edges"] = [
-                [int(a), int(b)] for a, b in grid.graph_edges
-            ]
+            # Prefer the cached ``edges_arr`` (int32 ndarray) when the grid
+            # exposes it: ``ndarray.tolist()`` is a single C-level call that
+            # produces nested Python ints directly, whereas the legacy
+            # ``graph_edges`` property allocates a fresh comprehension on
+            # every access AND we then re-comprehended it here. For ~20k
+            # edges that double-traversal cost ~30-50 ms per heartbeat.
+            edges_arr = getattr(grid, "edges_arr", None)
+            if edges_arr is not None and getattr(edges_arr, "size", 0):
+                graph_payload["edges"] = edges_arr.tolist()
+            else:
+                graph_payload["edges"] = [
+                    [int(a), int(b)] for a, b in grid.graph_edges
+                ]
             self._sent_graph_payload_version = self.graph_version
+
+        gol_flat = np.asarray(grid.gol_state).astype(np.uint8, copy=False).ravel()
+        spike_flat = np.asarray(spikes).astype(np.uint8, copy=False).ravel()
 
         topology_payload: Optional[Dict] = None
         if self.is_topology_mode and self.topology is not None:
@@ -530,6 +712,11 @@ class StreamPublisher:
                 "bbox_min": self.topology.bbox_min.tolist(),
                 "bbox_max": self.topology.bbox_max.tolist(),
                 "version": self.graph_version,
+                # Per-topology metric snapshot: empty when only one component
+                # is selected so the front-end can collapse the panel cheaply.
+                "per_component": self._per_component_metrics(
+                    grid, gol_flat, spike_flat
+                ),
             }
             if send_coords:
                 # Flat Float32-friendly array; the browser will read it
@@ -542,9 +729,6 @@ class StreamPublisher:
                 self._sent_coords_version = self.graph_version
         else:
             topology_payload = {"active": False}
-
-        gol_flat = np.asarray(grid.gol_state).astype(np.uint8, copy=False).ravel()
-        spike_flat = np.asarray(spikes).astype(np.uint8, copy=False).ravel()
 
         return {
             "ready": True,
@@ -570,6 +754,7 @@ class StreamPublisher:
             "graph": graph_payload,
             "topology": topology_payload,
             "generation_period_ms": self.generation_period_ms,
+            "paused": bool(self.paused),
             "coupling": {
                 "k_alive": float(grid.config.coupling.k_alive),
                 "k_neighbors": float(grid.config.coupling.k_neighbors),

@@ -3,12 +3,20 @@ import { HybridVisualizer } from "./visualizer.js";
 const API_BASE = "http://127.0.0.1:8765";
 const FETCH_MS = 70;
 const DRAG_THRESHOLD_PX = 6;
+const THEME_STORAGE_KEY = "viz-theme";
 
 const state = {
   lastStep: -1,
   lastAt: performance.now(),
   hz: 0,
   pointerDown: null,
+  paused: false,
+  ui: {
+    generationEditing: false,
+    generationDirty: false,
+    couplingEditing: false,
+    couplingDirty: false,
+  },
 };
 
 const statEls = {
@@ -33,6 +41,7 @@ const inputSurvive = document.getElementById("input-survive");
 const inputGenerationMs = document.getElementById("input-generation-ms");
 const btnApplyRules = document.getElementById("btn-apply-rules");
 const btnApplySpeed = document.getElementById("btn-apply-speed");
+const btnTogglePause = document.getElementById("btn-toggle-pause");
 const cbAutoRotate = document.getElementById("cb-auto-rotate");
 const btnResetCamera = document.getElementById("btn-reset-camera");
 const selectQuality = document.getElementById("select-quality");
@@ -54,9 +63,21 @@ const topologyList = document.getElementById("topology-list");
 const topologyStatus = document.getElementById("topology-status");
 const topologyActive = document.getElementById("topology-active");
 const btnLoadTopology = document.getElementById("btn-load-topology");
+const btnThemeToggle = document.getElementById("btn-theme-toggle");
+const themeToggleLabel = document.getElementById("theme-toggle-label");
+const perTopoGrid = document.getElementById("per-topo-grid");
+const perTopoEmpty = document.getElementById("per-topo-empty");
+
+/**
+ * Per-component DOM cache: topology key -> { card root, value cells, etc. }.
+ * Reusing nodes across frames avoids reflow churn at the 14 Hz poll rate
+ * and keeps GC quiet during long live sessions.
+ */
+const perTopoCardEls = new Map();
 
 const FALLBACK_TOPOLOGIES = [
   { key: "small_world", label: "Mevcut Topoloji (Rastgele Small-World)", kind: "small_world" },
+  { key: "legacy_cluster", label: "Klasik Topoloji (Legacy Cluster)", kind: "legacy" },
   { key: "granule_test", label: "granule_test", kind: "swc" },
   { key: "medium_spiniy_test", label: "medium_spiniy_test", kind: "swc" },
   { key: "pyramidal_test", label: "pyramidal_test", kind: "swc" },
@@ -128,11 +149,14 @@ async function fetchTopologyOptions() {
 }
 
 async function postControl(body) {
-  await fetch(`${API_BASE}/control`, {
+  const res = await fetch(`${API_BASE}/control`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
+  if (!res.ok) {
+    throw new Error(`Control request failed: HTTP ${res.status}`);
+  }
 }
 
 function parseRuleList(raw, fallback) {
@@ -145,6 +169,7 @@ function parseRuleList(raw, fallback) {
 
 function syncCouplingSlidersFromPayload(c) {
   if (!c) return;
+  if (state.ui.couplingEditing || state.ui.couplingDirty) return;
   if (rngKAlive) {
     rngKAlive.value = String(Number(c.k_alive));
     if (lblKAlive) lblKAlive.textContent = Number(c.k_alive).toFixed(2);
@@ -197,7 +222,18 @@ function updateStats(payload, viz) {
     setText(statEls.birth, `B${payload.rules.birth.join("")}`);
     setText(statEls.survival, `S${payload.rules.survive.join("")}`);
   }
-  if (typeof payload.generation_period_ms === "number" && inputGenerationMs) {
+  if (typeof payload.paused === "boolean") {
+    state.paused = payload.paused;
+    if (btnTogglePause) {
+      btnTogglePause.textContent = state.paused ? "Devam Et" : "Durdur";
+    }
+  }
+  if (
+    typeof payload.generation_period_ms === "number"
+    && inputGenerationMs
+    && !state.ui.generationEditing
+    && !state.ui.generationDirty
+  ) {
     inputGenerationMs.value = String(payload.generation_period_ms);
   }
   syncCouplingSlidersFromPayload(payload.coupling);
@@ -208,11 +244,197 @@ function updateStats(payload, viz) {
       topologyActive.textContent = "Aktif: small-world (klasik)";
     }
   }
+  // Per-topology metrics: backend ships an empty / single-element list when
+  // only one component is active, in which case the renderer falls back to
+  // the empty-state hint.
+  renderPerComponentMetrics(payload.topology?.per_component);
+}
+
+/**
+ * Read the stored UI theme. Falls back to OS preference once, then to the
+ * dark default that the existing artwork was tuned against. localStorage
+ * may throw in privacy modes; swallow that and return the default.
+ */
+function readStoredTheme() {
+  try {
+    const stored = localStorage.getItem(THEME_STORAGE_KEY);
+    if (stored === "light" || stored === "dark") return stored;
+  } catch (_err) {
+    // Storage disabled (private mode); fall through to OS preference.
+  }
+  if (window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches) {
+    return "light";
+  }
+  return "dark";
+}
+
+/**
+ * Apply a theme everywhere it matters: the document root (CSS vars), the
+ * Three.js scene chrome, and the toggle label. Persists the choice so it
+ * survives a reload.
+ */
+function applyTheme(theme, viz) {
+  const next = theme === "light" ? "light" : "dark";
+  document.documentElement.setAttribute("data-theme", next);
+  if (viz && typeof viz.setTheme === "function") {
+    viz.setTheme(next);
+  }
+  if (themeToggleLabel) {
+    themeToggleLabel.textContent = next === "light" ? "Koyu" : "Acik";
+  }
+  if (btnThemeToggle) {
+    btnThemeToggle.setAttribute(
+      "title",
+      next === "light" ? "Koyu temaya gec" : "Acik temaya gec",
+    );
+  }
+  try {
+    localStorage.setItem(THEME_STORAGE_KEY, next);
+  } catch (_err) {
+    // Best-effort persistence; ignore quota / private-mode failures.
+  }
+}
+
+function clamp01(value) {
+  const v = Number(value);
+  if (!Number.isFinite(v)) return 0;
+  return Math.max(0, Math.min(1, v));
+}
+
+/**
+ * Convert backend ``[r, g, b]`` floats (0..1) into a CSS rgb() string so
+ * the per-component card border accent matches the 3D color hint.
+ */
+function colorTripletToCss(rgb) {
+  if (!Array.isArray(rgb) || rgb.length < 3) return null;
+  const r = Math.round(clamp01(rgb[0]) * 255);
+  const g = Math.round(clamp01(rgb[1]) * 255);
+  const b = Math.round(clamp01(rgb[2]) * 255);
+  return `rgb(${r}, ${g}, ${b})`;
+}
+
+/**
+ * Build the static skeleton of a per-topology card and stash references to
+ * the value cells so subsequent updates only touch ``textContent``.
+ */
+function createPerTopoCard(component) {
+  const root = document.createElement("div");
+  root.className = "per-topo-card";
+  const accent = colorTripletToCss(component.color);
+  if (accent) root.style.borderLeftColor = accent;
+
+  const head = document.createElement("div");
+  head.className = "pt-head";
+  const title = document.createElement("span");
+  title.className = "pt-title";
+  title.textContent = component.label || component.key;
+  const tag = document.createElement("span");
+  tag.className = "pt-tag";
+  tag.textContent = (component.kind || "topo").toUpperCase();
+  head.appendChild(title);
+  head.appendChild(tag);
+  root.appendChild(head);
+
+  const valueCells = {};
+  const addRow = (key, label, isEfficiency = false) => {
+    const row = document.createElement("div");
+    row.className = "pt-row";
+    const lbl = document.createElement("span");
+    lbl.className = "lbl";
+    lbl.textContent = label;
+    const val = document.createElement("span");
+    val.className = isEfficiency ? "val eff" : "val";
+    val.textContent = "-";
+    row.appendChild(lbl);
+    row.appendChild(val);
+    root.appendChild(row);
+    valueCells[key] = val;
+  };
+
+  addRow("nodes", "Dugum");
+  addRow("alive_count", "Canli");
+  addRow("spike_count", "Spike");
+  addRow("firing_rate", "Firing rate");
+  addRow("stability_score", "Stability");
+  addRow("information_score", "Information");
+  addRow("memory_score", "Memory");
+  addRow("cost_score", "Cost");
+  addRow("efficiency_score", "Efficiency", true);
+
+  return { root, title, tag, valueCells };
+}
+
+function updatePerTopoCard(entry, component) {
+  if (!entry) return;
+  if (entry.title) entry.title.textContent = component.label || component.key;
+  if (entry.tag) entry.tag.textContent = (component.kind || "topo").toUpperCase();
+  const accent = colorTripletToCss(component.color);
+  if (accent) entry.root.style.borderLeftColor = accent;
+  const m = component.metrics || {};
+  const cells = entry.valueCells;
+  if (cells.nodes) cells.nodes.textContent = String(component.n_nodes ?? "-");
+  if (cells.alive_count) cells.alive_count.textContent = String(m.alive_count ?? 0);
+  if (cells.spike_count) cells.spike_count.textContent = String(m.spike_count ?? 0);
+  if (cells.firing_rate) cells.firing_rate.textContent = `${(Number(m.firing_rate ?? 0) * 100).toFixed(2)}%`;
+  if (cells.stability_score) cells.stability_score.textContent = Number(m.stability_score ?? 0).toFixed(3);
+  if (cells.information_score) cells.information_score.textContent = Number(m.information_score ?? 0).toFixed(3);
+  if (cells.memory_score) cells.memory_score.textContent = Number(m.memory_score ?? 0).toFixed(3);
+  if (cells.cost_score) cells.cost_score.textContent = Number(m.cost_score ?? 0).toFixed(3);
+  if (cells.efficiency_score) cells.efficiency_score.textContent = Number(m.efficiency_score ?? 0).toFixed(3);
+}
+
+/**
+ * Reconcile per-component metric cards with the latest backend snapshot.
+ * The "<= 1 component" branch shows a hint and clears cards so single-topology
+ * sessions stay visually quiet.
+ */
+function renderPerComponentMetrics(perComp) {
+  const list = Array.isArray(perComp) ? perComp : [];
+  if (list.length <= 1) {
+    if (perTopoEmpty) perTopoEmpty.style.display = "";
+    perTopoCardEls.forEach((entry) => entry.root.remove());
+    perTopoCardEls.clear();
+    return;
+  }
+  if (perTopoEmpty) perTopoEmpty.style.display = "none";
+
+  const seen = new Set();
+  for (const comp of list) {
+    if (!comp || !comp.key) continue;
+    seen.add(comp.key);
+
+    let cardEntry = perTopoCardEls.get(comp.key);
+    if (!cardEntry) {
+      cardEntry = createPerTopoCard(comp);
+      perTopoCardEls.set(comp.key, cardEntry);
+      perTopoGrid?.appendChild(cardEntry.root);
+    }
+    updatePerTopoCard(cardEntry, comp);
+  }
+
+  for (const [key, entry] of perTopoCardEls.entries()) {
+    if (!seen.has(key)) {
+      entry.root.remove();
+      perTopoCardEls.delete(key);
+    }
+  }
 }
 
 async function bootstrap() {
   const container = document.getElementById("canvas-root");
   const viz = new HybridVisualizer(container);
+
+  // Theme bootstrap must happen after the visualizer is instantiated so the
+  // scene chrome (background, fog) follows the same source of truth as the
+  // CSS variables on <html>.
+  const initialTheme = readStoredTheme();
+  applyTheme(initialTheme, viz);
+  btnThemeToggle?.addEventListener("click", () => {
+    const current = document.documentElement.getAttribute("data-theme") === "light"
+      ? "light"
+      : "dark";
+    applyTheme(current === "light" ? "dark" : "light", viz);
+  });
 
   const syncRangeLabel = (rng, lbl) => {
     if (!rng || !lbl) return;
@@ -246,17 +468,39 @@ async function bootstrap() {
   rngKSyn?.addEventListener("input", () => syncRangeLabel(rngKSyn, lblKSyn));
   rngTraceDecay?.addEventListener("input", () => syncRangeLabel(rngTraceDecay, lblTraceDecay));
 
+  const couplingInputs = [
+    rngKAlive, rngKNeighbors, rngBias, rngKSyn, rngTraceDecay, cbFeedback, cbGraphFeedbackNbors,
+  ].filter(Boolean);
+  couplingInputs.forEach((el) => {
+    el.addEventListener("pointerdown", () => { state.ui.couplingEditing = true; });
+    el.addEventListener("focus", () => { state.ui.couplingEditing = true; });
+    el.addEventListener("input", () => { state.ui.couplingDirty = true; });
+    el.addEventListener("change", () => { state.ui.couplingDirty = true; });
+    el.addEventListener("blur", () => { state.ui.couplingEditing = false; });
+  });
+
+  inputGenerationMs?.addEventListener("focus", () => { state.ui.generationEditing = true; });
+  inputGenerationMs?.addEventListener("input", () => { state.ui.generationDirty = true; });
+  inputGenerationMs?.addEventListener("change", () => { state.ui.generationDirty = true; });
+  inputGenerationMs?.addEventListener("blur", () => { state.ui.generationEditing = false; });
+
   btnApplyCoupling?.addEventListener("click", async () => {
-    await postControl({
-      action: "set_coupling",
-      k_alive: Number(rngKAlive?.value ?? 4),
-      k_neighbors: Number(rngKNeighbors?.value ?? 0.5),
-      bias: Number(rngBias?.value ?? 0.5),
-      feedback_enabled: !!cbFeedback?.checked,
-      k_syn: Number(rngKSyn?.value ?? 2.8),
-      spike_trace_decay: Number(rngTraceDecay?.value ?? 0.88),
-      feedback_graph_neighbors: !!cbGraphFeedbackNbors?.checked,
-    });
+    try {
+      await postControl({
+        action: "set_coupling",
+        k_alive: Number(rngKAlive?.value ?? 4),
+        k_neighbors: Number(rngKNeighbors?.value ?? 0.5),
+        bias: Number(rngBias?.value ?? 0.5),
+        feedback_enabled: !!cbFeedback?.checked,
+        k_syn: Number(rngKSyn?.value ?? 2.8),
+        spike_trace_decay: Number(rngTraceDecay?.value ?? 0.88),
+        feedback_graph_neighbors: !!cbGraphFeedbackNbors?.checked,
+      });
+      state.ui.couplingDirty = false;
+      state.ui.couplingEditing = false;
+    } catch (err) {
+      console.error("Failed to apply coupling:", err);
+    }
   });
 
   btnResetGrid?.addEventListener("click", async () => {
@@ -319,10 +563,29 @@ async function bootstrap() {
 
   btnApplySpeed?.addEventListener("click", async () => {
     const generationMs = Number(inputGenerationMs?.value ?? 50);
-    await postControl({
-      action: "set_generation_ms",
-      generation_ms: Number.isFinite(generationMs) ? generationMs : 50,
-    });
+    try {
+      await postControl({
+        action: "set_generation_ms",
+        generation_ms: Number.isFinite(generationMs) ? generationMs : 50,
+      });
+      state.ui.generationDirty = false;
+      state.ui.generationEditing = false;
+    } catch (err) {
+      console.error("Failed to apply generation timing:", err);
+    }
+  });
+
+  btnTogglePause?.addEventListener("click", async () => {
+    try {
+      await postControl({
+        action: "set_paused",
+        paused: !state.paused,
+      });
+      state.paused = !state.paused;
+      btnTogglePause.textContent = state.paused ? "Devam Et" : "Durdur";
+    } catch (err) {
+      console.error("Failed to toggle pause:", err);
+    }
   });
 
   async function poll() {

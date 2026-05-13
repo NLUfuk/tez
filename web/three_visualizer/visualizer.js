@@ -13,6 +13,37 @@ const TRAIL_COOL = new THREE.Color(0xd4283c);
 const BASE_EDGE_COLOR = new THREE.Color(0x634a82);
 const NEON_BURST = new THREE.Color(0x62ffb4);
 
+/**
+ * Per-theme scene chrome.
+ *
+ * IMPORTANT: even in "light" UI mode the WebGL viewport keeps a dark
+ * background. Reason: ``UnrealBloomPass`` extracts every fragment whose
+ * luminance exceeds ``bloomThreshold`` (~0.29 in the medium preset). A
+ * near-white background has luminance ~0.95, so on a light bg the bloom
+ * extractor selects the entire frame and blurs it back over the scene –
+ * the result is a fully washed-out, all-white image with no particles
+ * visible. This matches industry tooling: Blender, Maya and Photoshop
+ * all keep a dark canvas regardless of UI theme so HDR content stays
+ * legible. The brighter bg + lower exposure preset is kept for slightly
+ * softer contrast that pairs better with a light surrounding UI.
+ */
+const THEME_PRESETS = {
+  dark: {
+    background: 0x090618,
+    fogColor: 0x0c0822,
+    fogDensity: 0.014,
+    toneExposure: 1.08,
+    baseEdgeColor: new THREE.Color(0x634a82),
+  },
+  light: {
+    background: 0x141a2b,
+    fogColor: 0x141a2b,
+    fogDensity: 0.012,
+    toneExposure: 1.04,
+    baseEdgeColor: new THREE.Color(0x8c74c0),
+  },
+};
+
 /** Quality presets: bloom + edges + halo */
 const QUALITY_PRESETS = {
   low: {
@@ -95,8 +126,20 @@ export class HybridVisualizer {
   constructor(container) {
     this.container = container;
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x090618);
-    this.scene.fog = new THREE.FogExp2(0x0c0822, 0.014);
+    this.themeName = "dark";
+    const themePreset = THEME_PRESETS[this.themeName];
+    this.scene.background = new THREE.Color(themePreset.background);
+    this.scene.fog = new THREE.FogExp2(themePreset.fogColor, themePreset.fogDensity);
+    this._currentBaseEdgeColor = themePreset.baseEdgeColor.clone();
+    // Cached scene span set by ``_fitCameraToScene``. Used by
+    // ``_applySceneFog`` so the fog density auto-shrinks when many
+    // topologies are loaded side-by-side – otherwise the default density
+    // (tuned for a single ~80-unit component) absorbs >99% of every
+    // particle past the first component and the viewport looks empty.
+    this._sceneExtent = 80;
+    // Reusable Vector3 for screen projection of component centroids; kept
+    // off the per-frame allocator to avoid GC spikes during overlay updates.
+    this._projectionVec = new THREE.Vector3();
 
     this.camera = new THREE.PerspectiveCamera(52, 1, 0.1, 500);
     this._defaultCameraPos = new THREE.Vector3(0, 28, 78);
@@ -109,7 +152,7 @@ export class HybridVisualizer {
     this.renderer.setSize(container.clientWidth, container.clientHeight);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.08;
+    this.renderer.toneMappingExposure = themePreset.toneExposure;
     container.appendChild(this.renderer.domElement);
 
     this.renderPass = null;
@@ -280,6 +323,89 @@ export class HybridVisualizer {
 
   setAutoRotate(enabled) {
     this.controls.autoRotate = !!enabled;
+  }
+
+  /**
+   * Swap the scene chrome to match the requested UI theme. Cheap: only
+   * mutates already-allocated Three.js color objects + a uniform on the
+   * tone mapper. The base edge color is rebuilt only when a topology graph
+   * is present so we skip a no-op buffer rebuild on the rectangular grid.
+   */
+  setTheme(themeName) {
+    const next = themeName === "light" ? "light" : "dark";
+    if (next === this.themeName) return;
+    this.themeName = next;
+    const preset = THEME_PRESETS[next];
+    this.scene.background = new THREE.Color(preset.background);
+    if (this.scene.fog) {
+      this.scene.fog.color = new THREE.Color(preset.fogColor);
+      this._applySceneFog();
+    }
+    this.renderer.toneMappingExposure = preset.toneExposure;
+    this._currentBaseEdgeColor = preset.baseEdgeColor.clone();
+    if (this.graphEdges?.length && this.positions) {
+      this._rebuildBaseEdgesFromGraph();
+    }
+  }
+
+  /**
+   * Recompute ``scene.fog.density`` so the fog stays informative without
+   * eating distant components.
+   *
+   * Math:
+   *     ``FogExp2`` transmittance over distance ``d`` with density
+   *     ``rho`` is ``exp(-rho * d)``. We want the FAR EDGE of the scene
+   *     bbox (``_sceneExtent``) to keep at least ~30% transmittance so
+   *     particles behind a component remain visible. Solving
+   *     ``exp(-rho * extent) = 0.30`` gives ``rho = 1.2 / extent``.
+   *
+   * The result is clamped to the active theme's preset density (so a
+   * tiny single-component scene does not get even denser fog than the
+   * artist-tuned default) and to a small floor (so a huge multi-topology
+   * scene still has *some* depth cue).
+   */
+  _applySceneFog() {
+    if (!this.scene.fog) return;
+    const preset = THEME_PRESETS[this.themeName] ?? THEME_PRESETS.dark;
+    const extent = Math.max(this._sceneExtent || 1, 1);
+    // 1.2 ≈ -ln(0.3); keep ~30% transmittance at the bbox edge so the
+    // farthest topology still reads against the background.
+    const extentDensity = 1.2 / extent;
+    const target = Math.min(preset.fogDensity, extentDensity);
+    // Floor stops the scene from looking flat (no atmospheric falloff).
+    this.scene.fog.density = Math.max(0.0006, target);
+  }
+
+  /**
+   * Project a world-space point onto the renderer's container client
+   * rectangle. Returns ``null`` when the renderer has zero size or the
+   * point falls outside the camera's clip space (so callers can hide an
+   * overlay rather than parking it in the corner).
+   *
+   * Time:  O(1) – one matrix·vec and a couple of mults.
+   */
+  projectToContainer(point) {
+    if (!Array.isArray(point) || point.length < 3) return null;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+    this._projectionVec.set(
+      Number(point[0]) || 0,
+      Number(point[1]) || 0,
+      Number(point[2]) || 0,
+    );
+    this._projectionVec.project(this.camera);
+    const visible =
+      this._projectionVec.z > -1
+      && this._projectionVec.z < 1
+      && this._projectionVec.x > -1.05
+      && this._projectionVec.x < 1.05
+      && this._projectionVec.y > -1.05
+      && this._projectionVec.y < 1.05;
+    return {
+      x: (this._projectionVec.x * 0.5 + 0.5) * rect.width,
+      y: (1 - (this._projectionVec.y * 0.5 + 0.5)) * rect.height,
+      visible,
+    };
   }
 
   resetCameraDefault() {
@@ -536,6 +662,16 @@ export class HybridVisualizer {
       this._boundsSize.z,
       1,
     );
+    // Cache for fog auto-tune. Use the camera-target diagonal (not the
+    // largest single axis) because FogExp2 attenuates along view distance,
+    // so the worst-case visibility budget is the bbox diagonal.
+    const diag = Math.sqrt(
+      this._boundsSize.x * this._boundsSize.x
+      + this._boundsSize.y * this._boundsSize.y
+      + this._boundsSize.z * this._boundsSize.z,
+    );
+    this._sceneExtent = Math.max(maxExtent, diag, 1);
+    this._applySceneFog();
     const fov = THREE.MathUtils.degToRad(this.camera.fov);
     // Standard fit-camera trig: distance so half-extent subtends half-FOV,
     // padded 1.4x to leave breathing room for bloom and labels.
@@ -613,9 +749,10 @@ export class HybridVisualizer {
     const segCount = edges.length;
     const pos = new Float32Array(segCount * 2 * 3);
     const col = new Float32Array(segCount * 2 * 3);
-    const br = BASE_EDGE_COLOR.r;
-    const bg = BASE_EDGE_COLOR.g;
-    const bb = BASE_EDGE_COLOR.b;
+    const baseEdge = this._currentBaseEdgeColor ?? BASE_EDGE_COLOR;
+    const br = baseEdge.r;
+    const bg = baseEdge.g;
+    const bb = baseEdge.b;
     const p = this.positions;
 
     for (let s = 0; s < segCount; s++) {

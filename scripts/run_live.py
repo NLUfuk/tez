@@ -6,9 +6,7 @@ import sys
 import time
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.animation import FuncAnimation
 
 # Add src to path for imports
 _project_root = Path(__file__).parent.parent
@@ -19,6 +17,29 @@ if str(_src_path) not in sys.path:
 from conway_izh.config import CouplingParams, SimulationConfig
 from conway_izh.grid import NeuralGrid
 from conway_izh.viz import StreamBridge, StreamPublisher, StreamServer
+
+# matplotlib is only needed for the legacy "matplotlib" live mode. The
+# stream/Three.js mode is the production path and importing matplotlib at
+# module scope adds ~500 ms to cold-start for no benefit there. We keep
+# the symbol names exported here so the LiveSimulation class can refer
+# to them; the real import happens on first construction.
+plt = None  # type: ignore[assignment]
+FuncAnimation = None  # type: ignore[assignment]
+
+
+def _ensure_matplotlib() -> None:
+    """Lazy-load matplotlib (and its animation module) on first use.
+
+    The stream mode never touches these symbols, so callers that stay in
+    stream mode pay zero matplotlib import cost.
+    """
+    global plt, FuncAnimation
+    if plt is None:
+        import matplotlib.pyplot as _plt
+        from matplotlib.animation import FuncAnimation as _FA
+
+        plt = _plt
+        FuncAnimation = _FA
 
 # Default SWC catalogue lives under <repo>/data/morphology
 _DEFAULT_SWC_DIR = _project_root / "data" / "morphology"
@@ -93,6 +114,8 @@ class LiveSimulation:
     """Live animation wrapper for NeuralGrid."""
 
     def __init__(self, grid: NeuralGrid):
+        _ensure_matplotlib()
+
         self.grid = grid
         self.step_count = 0
         self.max_steps = grid.config.steps
@@ -281,6 +304,10 @@ class StreamSimulation:
             if next_grid is not None:
                 self.grid = next_grid
                 self.max_steps = max(self.max_steps, self.grid.config.steps)
+
+            if bool(getattr(self.publisher, "paused", False)):
+                time.sleep(0.05)
+                continue
 
             metrics, spikes = self.grid.step()
             self.step_count += 1
